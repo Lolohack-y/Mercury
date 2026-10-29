@@ -1,0 +1,28 @@
+services:
+  nagliadnik:
+    build: .
+    image: nagliadnik:latest
+    container_name: nagliadnik
+    ports:
+      - "3840:3840"
+    environment:
+      PORT: "3840"
+      HOST: "0.0.0.0"
+      AI_PROVIDER: ${AI_PROVIDER:-gigachat}
+      GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}
+      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat}
+      YANDEX_API_KEY: ${YANDEX_API_KEY:-}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
+      YANDEX_MODEL: ${YANDEX_MODEL:-yandexgpt-lite}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      WEBAPP_URL: ${WEBAPP_URL:-}
+    volumes:
+      - nagliadnik-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  nagliadnik-data:

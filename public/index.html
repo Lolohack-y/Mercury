@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Наглядность+ — материалы по учебнику</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <div class="logo">Наглядность+</div>
+      <p class="tag">Схема, таблица, карточки и тест строго по страницам вашего учебника</p>
+    </div>
+    <div class="top-side">
+      <a class="link" href="/tg/">Мини-приложение в Telegram</a>
+      <span class="pill" id="health">…</span>
+    </div>
+  </header>
+
+  <ol class="howto">
+    <li><b>1. Учебник</b><span>Загрузите файл или оставьте демо</span></li>
+    <li><b>2. Тема</b><span>Напишите, что нужно к уроку</span></li>
+    <li><b>3. Материал</b><span>Проверьте страницу и поправьте текст</span></li>
+  </ol>
+
+  <main class="grid">
+    <aside class="panel">
+      <h2>Учебники</h2>
+      <p class="lead">Подойдут PDF, EPUB, DjVu и TXT. Если файл оказался не тем — удалите его, он сразу пропадёт из поиска.</p>
+      <form id="uploadForm" class="stack">
+        <label class="file">Файл учебника
+          <input type="file" name="file" accept=".pdf,.epub,.djvu,.djv,.txt" required />
+        </label>
+        <label>Название
+          <input name="title" placeholder="Биология. 9 класс" />
+        </label>
+        <div class="row">
+          <label>Издательство
+            <input name="publisher" placeholder="Просвещение" />
+          </label>
+          <label>Предмет
+            <input name="subject" placeholder="Биология" />
+          </label>
+        </div>
+        <label>Класс
+          <input name="grade" placeholder="9" />
+        </label>
+        <button type="submit">Добавить учебник</button>
+      </form>
+      <p class="hint" id="uploadStatus">Демо уже в списке: можно сразу собрать схему по теме «фотосинтез».</p>
+      <ul id="books" class="books"></ul>
+
+      <details class="fold">
+        <summary>Нейросеть</summary>
+        <form id="aiForm" class="stack">
+          <p class="hint" id="aiStatus">Модель ищет формулировки в учебнике и собирает тест. Без ключа тест строится из цитат.</p>
+          <label>Модель
+            <select name="provider">
+              <option value="gigachat">GigaChat</option>
+              <option value="yandex">Алиса (YandexGPT)</option>
+            </select>
+          </label>
+          <label>Ключ авторизации
+            <input name="key" type="password" autocomplete="off" placeholder="Ключ из кабинета GigaChat или Yandex Cloud" />
+          </label>
+          <label>Каталог Yandex Cloud
+            <input name="folder" placeholder="Только для Алисы" />
+          </label>
+          <button type="submit" class="ghost">Подключить</button>
+        </form>
+      </details>
+
+      <details class="fold">
+        <summary>Оформление школы</summary>
+        <form id="brandForm" class="stack">
+          <label>Название школы <input name="school" /></label>
+          <div class="row">
+            <label>Основной цвет <input type="color" name="primary" /></label>
+            <label>Акцент <input type="color" name="accent" /></label>
+          </div>
+          <label>Шрифт материалов
+            <select name="font">
+              <option>Georgia</option>
+              <option>Times New Roman</option>
+              <option>PT Serif</option>
+              <option>Arial</option>
+            </select>
+          </label>
+          <button type="submit" class="ghost">Сохранить шаблон</button>
+        </form>
+      </details>
+    </aside>
+
+    <section class="panel">
+      <h2>Тема урока</h2>
+      <p class="lead">Один запрос — материал со ссылкой на страницу. Факты берутся только из отмеченных учебников.</p>
+      <form id="genForm" class="stack">
+        <label>Что подготовить?
+          <input id="query" required placeholder="Например: фотосинтез — световая фаза, 9 класс" />
+        </label>
+        <div class="row">
+          <label>Вид материала
+            <select id="type">
+              <option value="all">Всё сразу</option>
+              <option value="scheme">Схема</option>
+              <option value="table">Таблица</option>
+              <option value="cards">Карточки</option>
+              <option value="infographic">Инфографика</option>
+              <option value="presentation">Презентация</option>
+              <option value="test">Тест</option>
+            </select>
+          </label>
+          <label>Класс
+            <input id="grade" placeholder="9" />
+          </label>
+        </div>
+        <fieldset>
+          <legend>Искать в этих учебниках</legend>
+          <div id="bookPick" class="picks"></div>
+        </fieldset>
+        <label class="check"><input type="checkbox" id="skipCache" /> Собрать заново, не из кэша</label>
+        <button type="submit">Собрать материал</button>
+      </form>
+      <p class="err" id="genErr"></p>
+
+      <h2>Поправить готовое</h2>
+      <p class="lead">Учебник заново не читается: блок добавится в уже собранную схему и презентацию.</p>
+      <div class="edit-row">
+        <input id="editText" placeholder="Добавь блок про темновую фазу" />
+        <button type="button" id="editBtn" class="ghost">Поправить</button>
+      </div>
+    </section>
+  </main>
+
+  <section class="workspace" id="workspace">
+    <p class="empty">Здесь появится материал. У каждого блока будет номер страницы учебника.</p>
+  </section>
+
+  <script src="/app.js"></script>
+</body>
+</html>

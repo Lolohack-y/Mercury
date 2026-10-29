@@ -1,0 +1,24 @@
+[
+  {
+    "id": "b2a72c34-78bf-4324-b212-0f9d8ffd9349",
+    "title": "Биология. 9 класс (демо)",
+    "publisher": "Просвещение",
+    "subject": "Биология",
+    "grade": "9",
+    "filename": "demo.txt",
+    "createdAt": "2026-09-25T20:08:22.023Z",
+    "pages": 5,
+    "demo": true
+  },
+  {
+    "id": "e11b7bdf-df77-4f58-aaf5-c0a9eef5f40a",
+    "title": "История России. 9 класс (демо)",
+    "publisher": "Дрофа",
+    "subject": "История",
+    "grade": "9",
+    "filename": "demo-history.txt",
+    "createdAt": "2026-09-25T20:08:22.027Z",
+    "pages": 2,
+    "demo": true
+  }
+]
