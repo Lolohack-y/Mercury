@@ -29,11 +29,14 @@ const { ask, editPack } = require("./ask");
 const { buildPptx } = require("./pptx");
 const { status, saveSettings, ping } = require("./ai");
 const { startBot } = require("./bot");
+const { startMaxBot } = require("./maxbot");
 
 store.ensure();
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "4mb" }));
+// Старый адрес мини-приложения: теперь оно живёт на /max/.
+app.get(/^\/tg(\/.*)?$/, (req, res) => res.redirect(301, "/max/"));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 const upload = multer({ dest: store.UPLOADS, limits: { fileSize: 80 * 1024 * 1024 } });
@@ -183,6 +186,7 @@ const PORT = Number(process.env.PORT) || 3840;
 const HOST = process.env.HOST || "0.0.0.0";
 app.listen(PORT, HOST, () => {
   console.log(`Наглядник: http://${HOST}:${PORT}`);
-  console.log(`Мини-приложение: http://${HOST}:${PORT}/tg/`);
+  console.log(`Мини-приложение: http://${HOST}:${PORT}/max/`);
+  startMaxBot();
   startBot();
 });

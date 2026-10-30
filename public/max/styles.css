@@ -88,6 +88,18 @@ td, th { border-bottom: 1px solid var(--line); text-align: left; padding: 8px 6p
 .slide { padding: 16px; min-height: 180px; }
 .nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .fact, .src { padding: 10px 12px; margin: 8px 0; font-size: 14px; }
+.tq { border-top: 1px solid var(--line); padding: 12px 0 6px; }
+.tq:first-of-type { border-top: 0; }
+.qline { margin: 0 0 8px; font-weight: 600; }
+.opt { text-align: left; }
+.opt.on { background: var(--soft); border-color: var(--accent); }
+.opt.right { background: #e4f4ea; border-color: #1f7a4d; }
+.opt.wrong { background: #fdecef; border-color: #9d2c4a; }
+.fb.good { color: #1f7a4d; }
+.fb.bad { color: #9d2c4a; }
+.match-list { margin: 8px 0; padding-left: 22px; font-size: 14px; }
+.bar { height: 6px; background: #efe9f8; border-radius: 99px; margin: 6px 0; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
 .fact.mismatch { outline: 1px solid #f0b4c0; }
 .fact.ok { outline: 1px solid #b7e4c7; }
 .page { font-size: 12px; }

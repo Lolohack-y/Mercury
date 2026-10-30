@@ -1,5 +1,14 @@
-const tg = window.Telegram?.WebApp;
-const inTelegram = Boolean(tg?.initData);
+// MAX Bridge: window.WebApp (https://st.max.ru/js/max-web-app.js). Запасной вариант: Telegram.
+const tg = window.WebApp || window.Telegram?.WebApp;
+const inMessenger = Boolean(tg?.initData);
+const messengerName = window.WebApp ? "в MAX" : "в мессенджере";
+// В MAX нет системной главной кнопки, поэтому показываем свою кнопку внизу.
+const hasMain = Boolean(tg?.MainButton);
+const haptic = (kind) => {
+  try {
+    tg?.HapticFeedback?.notificationOccurred?.(kind);
+  } catch {}
+};
 
 const TYPES = [
   ["scheme", "Схема"],
@@ -71,7 +80,7 @@ async function generate(skipCache) {
   state.busy = true;
   state.status = "Ищу страницы учебника…";
   render();
-  tg?.MainButton.showProgress();
+  tg?.MainButton?.showProgress?.();
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -80,6 +89,7 @@ async function generate(skipCache) {
         query: state.query,
         type: state.type,
         grade: state.grade,
+        count: 8,
         bookIds: selectedBooks(),
         skipCache: Boolean(skipCache),
       }),
@@ -90,15 +100,15 @@ async function generate(skipCache) {
     state.tab = Object.keys(data.materials || {})[0] || "scheme";
     state.slide = 0;
     state.status = "";
-    tg?.HapticFeedback?.notificationOccurred("success");
+    haptic("success");
     go("result");
   } catch (e) {
     state.status = e.message;
-    tg?.HapticFeedback?.notificationOccurred("error");
+    haptic("error");
     render();
   } finally {
     state.busy = false;
-    tg?.MainButton.hideProgress();
+    tg?.MainButton?.hideProgress?.();
     syncMainButton();
   }
 }
@@ -173,27 +183,140 @@ function renderMaterial(kind, block) {
       <button type="button" class="btn wide" id="exportPptx">Скачать презентацию (PPTX)</button></article>`;
   }
   if (kind === "test") {
-    const letters = ["А", "Б", "В", "Г", "Д"];
-    return `<article class="card"><div class="mh"><h2>Тест</h2><span class="badge">По учебнику</span></div>${(block.items || [])
-      .map((t, i) => {
-        if (t.type === "open" || !t.options?.length) {
-          return `<p><b>${i + 1}.</b> <span class="qtype">Краткий ответ</span> ${esc(t.q)}</p><details><summary>Образец, с. ${esc(t.page)}</summary><p>${esc(t.sample || "")}</p></details>`;
-        }
-        const kindLabel = t.type === "judge" ? "Верно / неверно" : "Выбор ответа";
-        return `<p><b>${i + 1}.</b> <span class="qtype">${kindLabel}</span> ${esc(t.q)}</p><div class="stack">${t.options
-          .map((o, j) => `<button type="button" class="btn ghost" data-answer="${i}:${j}:${t.answer}:${t.page}">${letters[j]}. ${esc(o)}</button>`)
-          .join("")}</div><p class="hint" id="ans-${i}"></p>`;
-      })
-      .join("")}</article>`;
+    const items = block.items || [];
+    const total = items.reduce((s, t) => s + (t.points || 1), 0);
+    return `<article class="card" id="tgTest"><div class="mh"><h2>Тест</h2><span class="badge" id="tgScore">0 из ${total}</span></div>
+      ${block.note ? `<p class="hint">${esc(block.note)}</p>` : ""}
+      ${items.map((t, i) => tgQuestion(t, i)).join("")}</article>`;
   }
   return "";
+}
+
+const TG_LETTERS = ["А", "Б", "В", "Г", "Д", "Е"];
+
+function tgAnswerText(t) {
+  if (t.type === "choice") return `${TG_LETTERS[t.answer]}. ${t.options[t.answer]}`;
+  if (t.type === "judge") return t.options[t.answer];
+  if (t.type === "multi") return t.answer.map((i) => `${TG_LETTERS[i]}. ${t.options[i]}`).join("; ");
+  if (t.type === "order") return t.answer.map((i) => t.options[i]).join(" → ");
+  if (t.type === "match") return t.left.map((l, i) => `${l} → ${TG_LETTERS[t.answer[i]]}`).join("; ");
+  return t.sample || "";
+}
+
+function tgQuestion(t, i) {
+  const head = `<p class="qline"><b>${i + 1}.</b> <span class="qtype">${esc(t.kind || "Задание")}</span> ${esc(t.q)}</p>`;
+  let body = "";
+  if (t.type === "choice" || t.type === "judge") {
+    body = `<div class="stack">${t.options
+      .map((o, j) => `<button type="button" class="btn ghost opt" data-pick="${i}:${j}">${t.type === "judge" ? "" : `${TG_LETTERS[j]}. `}${esc(o)}</button>`)
+      .join("")}</div>`;
+  } else if (t.type === "multi") {
+    body = `<div class="stack">${t.options
+      .map((o, j) => `<button type="button" class="btn ghost opt" data-toggle="${i}:${j}">${TG_LETTERS[j]}. ${esc(o)}</button>`)
+      .join("")}</div><button type="button" class="btn wide" data-check="${i}">Проверить</button>`;
+  } else if (t.type === "order") {
+    body = `<p class="hint">Нажимайте события по порядку: от раннего к позднему.</p><div class="stack">${t.options
+      .map((o, j) => `<button type="button" class="btn ghost opt" data-seq="${i}:${j}">${esc(o)}</button>`)
+      .join("")}</div><p class="hint" id="seq-${i}"></p><button type="button" class="btn ghost wide" data-seqreset="${i}">Сбросить порядок</button>`;
+  } else if (t.type === "match") {
+    body = `<div class="stack">${t.left
+      .map(
+        (l, j) => `<label>${j + 1}. ${esc(l)}<select data-match="${i}:${j}"><option value="">—</option>${t.right
+          .map((_, k) => `<option value="${k}">${TG_LETTERS[k]}</option>`)
+          .join("")}</select></label>`
+      )
+      .join("")}</div><ol class="match-list" type="А">${t.right.map((r) => `<li>${esc(r)}</li>`).join("")}</ol><button type="button" class="btn wide" data-check="${i}">Проверить</button>`;
+  } else {
+    body = `<details><summary>Показать образец, с. ${esc(t.page)}</summary><p>${esc(t.sample || "")}</p>${
+      t.rubric?.length ? `<p class="hint">Критерии: ${t.rubric.map((r) => esc(r)).join("; ")}</p>` : ""
+    }</details>`;
+  }
+  return `<section class="tq" data-q="${i}" data-type="${t.type}">${head}${body}<p class="fb hint" id="fb-${i}"></p></section>`;
+}
+
+function bindTgTest() {
+  const root = $("#tgTest");
+  if (!root) return;
+  const items = state.pack?.materials?.test?.items || [];
+  const done = new Map();
+  const total = items.reduce((s, t) => s + (t.points || 1), 0);
+  const seq = new Map();
+  const picked = new Map();
+
+  const finish = (i, ok) => {
+    const t = items[i];
+    done.set(i, ok);
+    const fb = $("#fb-" + i);
+    fb.className = `fb ${ok ? "good" : "bad"}`;
+    fb.innerHTML = ok
+      ? `<b>Верно.</b> ${esc(t.hint || "")}`
+      : `<b>Неверно.</b> Правильно: ${esc(tgAnswerText(t))}. ${esc(t.hint || "")}`;
+    root.querySelectorAll(`[data-q="${i}"] button, [data-q="${i}"] select`).forEach((b) => (b.disabled = true));
+    let got = 0;
+    for (const [k, v] of done) if (v) got += items[k].points || 1;
+    $("#tgScore").textContent = `${got} из ${total}`;
+    haptic(ok ? "success" : "error");
+  };
+
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.pick) {
+      const [i, j] = b.dataset.pick.split(":").map(Number);
+      b.classList.add(j === items[i].answer ? "right" : "wrong");
+      finish(i, j === items[i].answer);
+    } else if (b.dataset.toggle) {
+      const [i, j] = b.dataset.toggle.split(":").map(Number);
+      const set = picked.get(i) || new Set();
+      if (set.has(j)) set.delete(j);
+      else set.add(j);
+      picked.set(i, set);
+      b.classList.toggle("on", set.has(j));
+    } else if (b.dataset.seq) {
+      const [i, j] = b.dataset.seq.split(":").map(Number);
+      const list = seq.get(i) || [];
+      if (list.includes(j)) return;
+      list.push(j);
+      seq.set(i, list);
+      b.classList.add("on");
+      b.textContent = `${list.length}. ${items[i].options[j]}`;
+      $("#seq-" + i).textContent = "";
+      if (list.length === items[i].options.length) finish(i, list.every((v, k) => v === items[i].answer[k]));
+    } else if (b.dataset.seqreset) {
+      const i = Number(b.dataset.seqreset);
+      seq.set(i, []);
+      root.querySelectorAll(`[data-seq^="${i}:"]`).forEach((x) => {
+        x.classList.remove("on");
+        x.textContent = items[i].options[Number(x.dataset.seq.split(":")[1])];
+      });
+    } else if (b.dataset.check) {
+      const i = Number(b.dataset.check);
+      const t = items[i];
+      if (t.type === "multi") {
+        const set = [...(picked.get(i) || [])].sort((a, c) => a - c);
+        if (!set.length) {
+          $("#fb-" + i).textContent = "Сначала выберите ответы.";
+          return;
+        }
+        finish(i, set.length === t.answer.length && set.every((v, k) => v === t.answer[k]));
+      } else if (t.type === "match") {
+        const vals = [...root.querySelectorAll(`select[data-match^="${i}:"]`)].map((s) => s.value);
+        if (vals.some((v) => v === "")) {
+          $("#fb-" + i).textContent = "Выберите букву для каждой строки.";
+          return;
+        }
+        finish(i, vals.every((v, k) => Number(v) === t.answer[k]));
+      }
+    }
+  });
 }
 
 function sourcesHtml(pack) {
   const sources = pack.sources || [];
   let html = `<h2>Откуда взято</h2>`;
   for (const s of sources.slice(0, 6)) {
-    html += `<div class="src"><b>${esc(s.bookTitle)}</b> · ${esc(s.publisher)} · с. ${esc(s.page)}<br />«${esc(s.excerpt)}»</div>`;
+    const pct = Math.round(Math.min(1, Math.max(0.04, Number(s.score) || 0)) * 100);
+    html += `<div class="src"><b>${esc(s.section || s.bookTitle)}</b> · с. ${esc(s.page)}<div class="bar"><i style="width:${pct}%"></i></div>«${esc(s.excerpt)}»</div>`;
   }
   const pubs = Object.entries(pack.compare || {});
   if (pubs.length > 1) {
@@ -304,8 +427,13 @@ function resultHtml() {
   const pack = state.pack;
   if (!pack) return `<p class="empty">Материала пока нет.</p>`;
   const cached = pack.cached ? "Из кэша · " : "";
+  const notes = [];
+  for (const fx of pack.search?.fixes || []) notes.push(`«${esc(fx.raw)}» → «${esc(fx.suggestion)}»`);
+  if ((pack.search?.unknown || []).length) notes.push(`Нет в учебниках: ${pack.search.unknown.map((x) => esc(x)).join(", ")}`);
+  if ((pack.search?.quality ?? 1) < 0.45) notes.push("Тема найдена слабо, проверьте источники");
   return `
-    <p class="hint">${cached}${pack.model ? `Тест собрала ${esc(pack.model)} · ` : "Собрано из цитат учебника · "}${esc(pack.brand?.school || "")}</p>
+    <p class="hint">${cached}${pack.model ? `Тест собрала ${esc(pack.model)} · ` : "Тест из текста учебника · "}${esc(pack.brand?.school || "")}</p>
+    ${notes.length ? `<p class="fact mismatch">${notes.join(". ")}</p>` : ""}
     ${materialsHtml(pack)}
     ${sourcesHtml(pack)}
     <h2>Правка на лету</h2>
@@ -319,13 +447,14 @@ function resultHtml() {
 function render() {
   const view = $("#view");
   const back = $("#back");
-  back.hidden = state.screen === "home";
+  // В MAX есть системная кнопка «Назад», своя нужна только в обычном браузере.
+  back.hidden = state.screen === "home" || Boolean(inMessenger && tg?.BackButton);
   if (state.screen === "home") view.innerHTML = homeHtml();
   if (state.screen === "books") view.innerHTML = booksHtml();
   if (state.screen === "ask") view.innerHTML = askHtml();
   if (state.screen === "result") view.innerHTML = resultHtml();
   const dock = $("#dock");
-  const showDock = !inTelegram && (state.screen === "ask" || state.screen === "home");
+  const showDock = !(inMessenger && hasMain) && (state.screen === "ask" || state.screen === "home");
   dock.hidden = !showDock;
   dock.innerHTML = showDock
     ? `<button type="button" id="dockGo">${state.screen === "home" ? "Собрать схему по демо" : "Собрать материал"}</button>`
@@ -333,7 +462,7 @@ function render() {
   bind();
   syncMainButton();
   const who = $("#who");
-  if (who) who.textContent = inTelegram ? "в Telegram" : "строго по учебнику";
+  if (who) who.textContent = inMessenger ? messengerName : "строго по учебнику";
 }
 
 function bind() {
@@ -393,15 +522,7 @@ function bind() {
       render();
     };
   });
-  document.querySelectorAll("[data-answer]").forEach((b) => {
-    b.onclick = () => {
-      const [i, j, answer, page] = b.dataset.answer.split(":");
-      const box = document.getElementById("ans-" + i);
-      const ok = String(j) === String(answer);
-      if (box) box.textContent = ok ? `Верно. Сверьте формулировку на с. ${page}` : `Неверно. Откройте учебник, с. ${page}`;
-      tg?.HapticFeedback?.selectionChanged();
-    };
-  });
+  bindTgTest();
 }
 
 async function exportPptx() {
@@ -490,22 +611,28 @@ async function saveBrand(e) {
 
 function syncMainButton() {
   if (!tg) return;
-  const btn = tg.MainButton;
-  btn.setParams({ color: "#6d2dd6", text_color: "#ffffff" });
-  if (state.screen === "home") {
-    btn.setText("Собрать схему по демо");
-    btn.show();
-  } else if (state.screen === "ask") {
-    btn.setText(state.busy ? "Собираю…" : "Собрать материал");
-    btn.show();
-  } else if (state.screen === "result") {
-    btn.hide();
-  } else {
-    btn.setText("К запросу");
-    btn.show();
-  }
-  if (state.screen === "home") tg.BackButton.hide();
-  else tg.BackButton.show();
+  try {
+    if (hasMain) {
+      const btn = tg.MainButton;
+      btn.setParams?.({ color: "#6d2dd6", text_color: "#ffffff" });
+      if (state.screen === "home") {
+        btn.setText("Собрать схему по демо");
+        btn.show();
+      } else if (state.screen === "ask") {
+        btn.setText(state.busy ? "Собираю…" : "Собрать материал");
+        btn.show();
+      } else if (state.screen === "result") {
+        btn.hide();
+      } else {
+        btn.setText("К запросу");
+        btn.show();
+      }
+    }
+    if (tg.BackButton) {
+      if (state.screen === "home") tg.BackButton.hide();
+      else tg.BackButton.show();
+    }
+  } catch {}
 }
 
 function onMain() {
@@ -521,16 +648,20 @@ function onMain() {
 }
 
 if (tg) {
-  applyTheme();
-  tg.ready();
-  tg.expand();
-  tg.BackButton.onClick(() => {
-    if (state.screen === "result") go("ask");
-    else go("home");
-  });
-  tg.MainButton.onClick(onMain);
-  const start = tg.initDataUnsafe?.start_param;
-  if (start) state.query = decodeURIComponent(start).replace(/_/g, " ");
+  try {
+    applyTheme();
+    tg.ready?.();
+    tg.expand?.();
+    tg.BackButton?.onClick?.(() => {
+      if (state.screen === "result") go("ask");
+      else go("home");
+    });
+    if (hasMain) tg.MainButton.onClick(onMain);
+    const start = tg.initDataUnsafe?.start_param;
+    if (start) state.query = decodeURIComponent(start).replace(/_/g, " ");
+  } catch (e) {
+    console.warn("Мост мессенджера:", e);
+  }
 }
 
 loadState()

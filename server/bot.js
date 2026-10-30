@@ -186,4 +186,4 @@ function startBot() {
     .catch((e) => console.error("Бот не запустился:", e.message));
 }
 
-module.exports = { startBot };
+module.exports = { startBot, formatPack, esc };
