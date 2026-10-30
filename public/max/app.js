@@ -24,9 +24,13 @@ const state = {
   screen: "home",
   books: [],
   brand: {},
-  type: "scheme",
+  type: "all",
   query: "фотосинтез, световая фаза",
   grade: "9",
+  count: 8,
+  skipCache: false,
+  ai: { ready: false, name: "", provider: "gigachat", folder: "" },
+  testMode: "student",
   bookIds: [],
   pack: null,
   pendingDelete: "",
@@ -37,6 +41,26 @@ const state = {
 };
 
 const $ = (s) => document.querySelector(s);
+
+function highlight(text, marks) {
+  const set = new Set((marks || []).map((m) => String(m).toLowerCase()));
+  return String(text || "")
+    .split(/([A-Za-zА-Яа-яЁё0-9-]+)/)
+    .map((part) => (set.has(part.toLowerCase()) ? `<mark>${esc(part)}</mark>` : esc(part)))
+    .join("");
+}
+
+function pg(page) {
+  return /^\d+$/.test(String(page))
+    ? `<button type="button" class="page" data-page="${esc(page)}">с. ${esc(page)}</button>`
+    : `<span class="page">${esc(page)}</span>`;
+}
+
+function qualityLabel(q) {
+  if (q >= 0.75) return ["Высокое", "good"];
+  if (q >= 0.45) return ["Среднее", "mid"];
+  return ["Слабое", "low"];
+}
 
 function esc(s) {
   return String(s ?? "")
@@ -73,7 +97,36 @@ async function loadState() {
   const data = await (await fetch("/api/state")).json();
   state.books = data.books || [];
   state.brand = data.brand || {};
+  if (state.brand.font) document.documentElement.style.setProperty("--mat-font", state.brand.font);
   if (!state.bookIds.length) state.bookIds = state.books.map((b) => b.id);
+  try {
+    const ai = await (await fetch("/api/ai")).json();
+    state.ai = {
+      ready: Boolean(ai.ready),
+      name: ai.name || "",
+      provider: ai.provider === "yandex" ? "yandex" : "gigachat",
+      folder: ai.folder || "",
+    };
+  } catch {
+    /* сервер без блока нейросети */
+  }
+}
+
+function recentTopics() {
+  try {
+    return JSON.parse(localStorage.getItem("recentTopics") || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function rememberTopic(q) {
+  const list = [q, ...recentTopics().filter((x) => x.toLowerCase() !== String(q).toLowerCase())].slice(0, 5);
+  try {
+    localStorage.setItem("recentTopics", JSON.stringify(list));
+  } catch {
+    /* хранилище недоступно */
+  }
 }
 
 async function generate(skipCache) {
@@ -89,9 +142,9 @@ async function generate(skipCache) {
         query: state.query,
         type: state.type,
         grade: state.grade,
-        count: 8,
+        count: Number(state.count) || 8,
         bookIds: selectedBooks(),
-        skipCache: Boolean(skipCache),
+        skipCache: Boolean(skipCache ?? state.skipCache),
       }),
     });
     const data = await res.json();
@@ -100,14 +153,16 @@ async function generate(skipCache) {
     state.tab = Object.keys(data.materials || {})[0] || "scheme";
     state.slide = 0;
     state.status = "";
+    state.busy = false;
+    rememberTopic(state.query);
     haptic("success");
     go("result");
   } catch (e) {
     state.status = e.message;
+    state.busy = false;
     haptic("error");
     render();
   } finally {
-    state.busy = false;
     tg?.MainButton?.hideProgress?.();
     syncMainButton();
   }
@@ -147,6 +202,14 @@ function materialsHtml(pack) {
   return html;
 }
 
+function snapshotAsk() {
+  if ($("#query")) state.query = $("#query").value;
+  if ($("#grade")) state.grade = $("#grade").value;
+  const boxes = document.querySelectorAll('input[name="bid"]');
+  if (boxes.length) state.bookIds = [...document.querySelectorAll('input[name="bid"]:checked')].map((i) => i.value);
+  if ($("#skipCache")) state.skipCache = $("#skipCache").checked;
+}
+
 function label(k) {
   return TYPES.find((t) => t[0] === k)?.[1] || k;
 }
@@ -155,22 +218,22 @@ function renderMaterial(kind, block) {
   if (!block) return `<p class="empty">Нет такого материала.</p>`;
   if (kind === "scheme") {
     return `<article class="card"><div class="mh"><h2>${esc(block.topic)}</h2><span class="badge">Схема</span></div><div class="scheme">${block.nodes
-      .map((n) => `<div class="node"><b>${esc(n.title)}</b><p>${esc(n.body)}</p><span class="page">с. ${esc(n.page)}</span></div>`)
+      .map((n) => `<div class="node"><b>${esc(n.title)}</b><p>${esc(n.body)}</p>${pg(n.page)}</div>`)
       .join("")}</div></article>`;
   }
   if (kind === "table") {
-    return `<article class="card"><div class="mh"><h2>Таблица</h2><span class="badge">Таблица</span></div><table><tr>${block.headers
+    return `<article class="card"><div class="mh"><h2>Таблица</h2><span class="badge">Таблица</span></div><div class="table-wrap"><table><tr>${block.headers
       .map((h) => `<th>${esc(h)}</th>`)
-      .join("")}</tr>${block.rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</table></article>`;
+      .join("")}</tr>${block.rowsmap((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</table></div></article>`;
   }
   if (kind === "cards") {
     return `<article class="card"><div class="mh"><h2>Карточки</h2><span class="badge">Карточки</span></div><div class="cards">${block.items
-      .map((c) => `<div class="flip"><b>${c.n}. ${esc(c.front)}</b><p>${esc(c.back)}</p><span class="page">с. ${esc(c.page)}</span></div>`)
+      .map((c) => `<div class="flip"><b>${c.n}. ${esc(c.front)}</b><p>${esc(c.back)}</p>${pg(c.page)}</div>`)
       .join("")}</div></article>`;
   }
   if (kind === "infographic") {
     return `<article class="card"><div class="mh"><h2>Инфографика</h2><span class="badge">Шаги</span></div><div class="steps">${block.steps
-      .map((s) => `<div class="step"><b>${s.n}. ${esc(s.title)}</b><p>${esc(s.text)}</p><span class="page">с. ${esc(s.page)}</span></div>`)
+      .map((s) => `<div class="step"><b>${s.n}. ${esc(s.title)}</b><p>${esc(s.text)}</p>${pg(s.page)}</div>`)
       .join("")}</div></article>`;
   }
   if (kind === "presentation") {
@@ -179,13 +242,20 @@ function renderMaterial(kind, block) {
     if (!s) return "";
     return `<article class="card"><div class="mh"><h2>Презентация</h2><span class="badge">${state.slide + 1} / ${slides.length}</span></div>
       <div class="slide"><h2>${esc(s.title)}</h2><ul>${(s.bullets || []).map((b) => `<li>${esc(b)}</li>`).join("")}</ul></div>
-      <div class="nav"><button type="button" class="btn ghost" id="prevSlide">Назад</button><button type="button" class="btn ghost" id="nextSlide">Дальше</button></div>
-      <button type="button" class="btn wide" id="exportPptx">Скачать презентацию (PPTX)</button></article>`;
+      <div class="nav"><button type="button" class="btn ghost" id="prevSlide">Назад</button><button type="button" class="btn ghost" id="nextSlide">Дальше</button></div></article>`;
   }
   if (kind === "test") {
     const items = block.items || [];
     const total = items.reduce((s, t) => s + (t.points || 1), 0);
-    return `<article class="card" id="tgTest"><div class="mh"><h2>Тест</h2><span class="badge" id="tgScore">0 из ${total}</span></div>
+    return `<article class="card" id="tgTest" data-mode="${state.testMode || "student"}"><div class="mh"><h2>Тест</h2><span class="badge" id="tgScore">0 из ${total}</span></div>
+      <div class="seg">
+        <button type="button" class="${state.testMode === "key" ? "" : "on"}" data-mode="student">Ученик</button>
+        <button type="button" class="${state.testMode === "key" ? "on" : ""}" data-mode="key">Ключ учителя</button>
+      </div>
+      <div class="seg">
+        <button type="button" class="btn ghost" data-print="student">Печать без ответов</button>
+        <button type="button" class="btn ghost" data-print="key">Печать с ключом</button>
+      </div>
       ${block.note ? `<p class="hint">${esc(block.note)}</p>` : ""}
       ${items.map((t, i) => tgQuestion(t, i)).join("")}</article>`;
   }
@@ -231,7 +301,8 @@ function tgQuestion(t, i) {
       t.rubric?.length ? `<p class="hint">Критерии: ${t.rubric.map((r) => esc(r)).join("; ")}</p>` : ""
     }</details>`;
   }
-  return `<section class="tq" data-q="${i}" data-type="${t.type}">${head}${body}<p class="fb hint" id="fb-${i}"></p></section>`;
+  const key = `<p class="key"><b>Ответ:</b> ${esc(tgAnswerText(t))}${t.hint ? ` · ${esc(t.hint)}` : ""} ${pg(t.page)}</p>`;
+  return `<section class="tq" data-q="${i}" data-type="${t.type}">${head}${body}${key}<p class="fb hint" id="fb-${i}"></p></section>`;
 }
 
 function bindTgTest() {
@@ -261,6 +332,19 @@ function bindTgTest() {
   root.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
+    if (b.dataset.mode) {
+      state.testMode = b.dataset.mode;
+      root.dataset.mode = b.dataset.mode;
+      root.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("on", x === b));
+      return;
+    }
+    if (b.dataset.print) {
+      state.testMode = b.dataset.print;
+      root.dataset.mode = b.dataset.print;
+      document.body.dataset.print = b.dataset.print;
+      window.print();
+      return;
+    }
     if (b.dataset.pick) {
       const [i, j] = b.dataset.pick.split(":").map(Number);
       b.classList.add(j === items[i].answer ? "right" : "wrong");
@@ -311,63 +395,98 @@ function bindTgTest() {
   });
 }
 
-function sourcesHtml(pack) {
-  const sources = pack.sources || [];
-  let html = `<h2>Откуда взято</h2>`;
-  for (const s of sources.slice(0, 6)) {
-    const pct = Math.round(Math.min(1, Math.max(0.04, Number(s.score) || 0)) * 100);
-    html += `<div class="src"><b>${esc(s.section || s.bookTitle)}</b> · с. ${esc(s.page)}<div class="bar"><i style="width:${pct}%"></i></div>«${esc(s.excerpt)}»</div>`;
+function tabsFor(pack) {
+  const m = pack.materials || {};
+  const names = { scheme: "Схема", table: "Таблица", cards: "Карточки", infographic: "Инфографика", presentation: "Презентация", test: "Тест" };
+  const tabs = [{ id: "sources", label: "Источники", count: (pack.sources || []).length }];
+  for (const id of Object.keys(names)) {
+    if (m[id]) tabs.push({ id, label: names[id], count: id === "test" ? (m[id].items || []).length : undefined });
   }
-  const pubs = Object.entries(pack.compare || {});
-  if (pubs.length > 1) {
-    html += `<h2>Два УМК</h2>`;
-    for (const [pub, items] of pubs) {
-      html += `<div class="src"><b>${esc(pub)}</b>${items
-        .slice(0, 2)
-        .map((i) => `<p>с. ${esc(i.page)}: ${esc(i.excerpt)}</p>`)
-        .join("")}</div>`;
-    }
-  }
-  const facts = pack.factCheck?.items || [];
-  const bad = facts.filter((f) => f.status === "mismatch");
-  html += `<h2>Проверка цифр</h2>`;
-  if (!facts.length) html += `<p class="hint">В этом материале нет чисел для сверки.</p>`;
-  else if (!bad.length) html += `<div class="fact ok">Цифры и даты есть в тексте учебника.</div>`;
-  else {
-    for (const f of bad.slice(0, 4)) {
-      html += `<div class="fact mismatch"><b>${esc(f.claim)}</b> — ${esc(f.hint)}</div>`;
-    }
-  }
-  return html;
+  if (pack.factCheck) tabs.push({ id: "facts", label: "Проверка", warn: pack.factCheck.mismatches });
+  if (pack.compare && Object.keys(pack.compare).length > 1) tabs.push({ id: "compare", label: "Два УМК" });
+  return tabs;
 }
 
+function sourcesHtml(pack) {
+  const sources = pack.sources || [];
+  if (!sources.length) return `<p class="empty">Страницы не найдены.</p>`;
+  return `<p class="hint">Факты взяты только отсюда. Совпавшие слова подсвечены.</p>${sources
+    .map((s) => {
+      const pct = Math.round(Math.min(1, Math.max(0.04, Number(s.score) || 0)) * 100);
+      const extra = (s.passages || []).filter((x) => !String(s.excerpt || "").includes(String(x).slice(0, 40)));
+      return `<article class="src" data-src-page="${esc(s.page)}"><div class="mh"><b>${esc(s.section || s.bookTitle)}</b>${pg(s.page)}</div>
+        <small>${s.section ? `${esc(s.bookTitle)} · ` : ""}${esc(s.publisher || "")}</small>
+        <div class="bar"><i style="width:${pct}%"></i></div><span class="hint">${pct}%</span>
+        <p>«${highlight(s.excerpt, s.marks)}»</p>
+        ${extra.length ? `<details><summary>Ещё со страницы</summary>${extra.map((x) => `<p>«${highlight(x, s.marks)}»</p>`).join("")}</details>` : ""}
+      </article>`;
+    })
+    .join("")}`;
+}
+
+function factsHtml(pack) {
+  const facts = pack.factCheck?.items || [];
+  const bad = facts.filter((f) => f.status === "mismatch");
+  if (!facts.length) return `<p class="hint">В этом материале нет чисел для сверки.</p>`;
+  const head = bad.length
+    ? `<p class="fact mismatch">Расхождений: ${bad.length}. Проверьте вручную.</p>`
+    : `<div class="fact ok">Цифры и даты есть в тексте учебника.</div>`;
+  return head + facts
+    .map((f) => `<div class="fact ${f.status === "mismatch" ? "mismatch" : "ok"}"><b>${esc(f.claim)}</b> — ${esc(f.hint)}</div>`)
+    .join("");
+}
+
+function compareHtml(pack) {
+  return Object.entries(pack.compare || {})
+    .map(
+      ([pub, items]) =>
+        `<div class="src"><b>${esc(pub)}</b>${items
+          .map((i) => `<p>${pg(i.page)} ${esc(i.excerpt || i.title || "")}</p>`)
+          .join("")}</div>`
+    )
+    .join("");
+}
+
+const EXAMPLES = [
+  ["фотосинтез, световая фаза", "9", "Биология", "Световая фаза"],
+  ["Отечественная война 1812 года", "9", "История", "Война 1812 года"],
+];
+
 function homeHtml() {
-  const name = tg?.initDataUnsafe?.user?.first_name;
+  const name = tg?.initDataUnsafe?.user?.first_name || tg?.initDataUnsafe?.user?.name;
   return `
     <section class="hero">
-      <div class="kicker">Мини-приложение для учителя</div>
-      <h1>Наглядность+</h1>
-      <p>${name ? esc(name) + ", м" : "М"}атериалы строго по страницам учебника. Сервис не выдумывает факты.</p>
+      <div class="kicker">Для учителя</div>
+      <h1>${name ? esc(name) + ", что нужно к уроку?" : "Что нужно к уроку?"}</h1>
+      <p>Схема, таблица, карточки и тест только по страницам загруженного учебника.</p>
     </section>
-    <div class="steps">
-      <div class="step-card"><b>1</b>Загрузка PDF, DjVu, EPUB</div>
-      <div class="step-card"><b>2</b>Тема и класс</div>
-      <div class="step-card"><b>3</b>Схема со ссылкой на страницу</div>
-    </div>
+    <p class="section">Готовые темы</p>
+    <div class="examples">${EXAMPLES.map(
+      ([query, grade, subject, title]) =>
+        `<button type="button" class="ex" data-ex="${esc(query)}" data-grade="${grade}"><small>${esc(subject)} · ${grade} класс</small><b>${esc(title)}</b><span>Собрать всё</span></button>`
+    ).join("")}</div>
     <div class="stack">
-      <button type="button" class="btn wide" id="demo">Собрать схему: фотосинтез, 9 класс</button>
-      <button type="button" class="btn ghost wide" id="toAsk">Своя тема</button>
+      <button type="button" class="btn wide" id="toAsk">Своя тема</button>
       <button type="button" class="btn ghost wide" id="toBooks">Учебники · ${state.books.length}</button>
+      <button type="button" class="btn ghost wide" id="toAi">Нейросеть · ${state.ai?.ready ? esc(state.ai.name) : "выключена"}</button>
     </div>
-    <p class="err">${esc(state.status)}</p>
-    <p class="hint">Демо-учебники «Просвещение» и «Дрофа» уже в индексе. Повторный запрос открывается из кэша.</p>`;
+    ${
+      recentTopics().length
+        ? `<p class="section">Недавние</p><div class="chips">${recentTopics()
+            .map((t) => `<button type="button" class="chip" data-ex="${esc(t)}" data-grade="${esc(state.grade)}">${esc(t)}</button>`)
+            .join("")}</div>`
+        : ""
+    }
+    <p class="err">${state.busy ? "" : esc(state.status)}</p>
+    <p class="hint">Демо-учебники уже в индексе. Повтор того же запроса открывается сразу.</p>`;
 }
 
 function booksHtml() {
   return `
     <h2>Учебники</h2>
+    <p class="hint">Файл индексируется на сервере. В материал попадают только найденные страницы.</p>
     <form id="up" class="stack card">
-      <label>PDF, EPUB, DjVu или TXT<input type="file" name="file" accept=".pdf,.epub,.djvu,.djv,.txt" required /></label>
+      <label class="file">PDF, EPUB, DjVu или TXT<input type="file" name="file" accept=".pdf,.epub,.djvu,.djv,.txt" required /></label>
       <div class="row2">
         <label>Название<input name="title" placeholder="Биология. 9 класс" /></label>
         <label>Класс<input name="grade" placeholder="9" /></label>
@@ -389,15 +508,22 @@ function booksHtml() {
             .join("")
         : `<p class="hint">Пока нет учебников.</p>`
     }</div>
-    <h2>Шаблон школы</h2>
+    <details class="fold">
+    <summary>Оформление школы</summary>
     <form id="brand" class="stack card">
       <label>Название<input name="school" value="${esc(state.brand.school || "")}" /></label>
       <div class="row2">
         <label>Цвет<input type="color" name="primary" value="${esc(toHex(state.brand.primary))}" /></label>
         <label>Акцент<input type="color" name="accent" value="${esc(toHex(state.brand.accent))}" /></label>
       </div>
+      <label>Шрифт материалов
+        <select name="font">
+          ${["Georgia", "Times New Roman", "PT Serif", "Arial"].map((f) => `<option ${state.brand.font === f ? "selected" : ""}>${f}</option>`).join("")}
+        </select>
+      </label>
       <button class="btn ghost" type="submit">Сохранить для всех материалов</button>
-    </form>`;
+    </form>
+    </details>`;
 }
 
 function toHex(c) {
@@ -405,43 +531,123 @@ function toHex(c) {
 }
 
 function askHtml() {
+  const grades = ["7", "8", "9", "10", "11"];
   return `
-    <h2>Запрос</h2>
-    <p class="hint">Например: «сделай схему по световой фазе фотосинтеза для 9 класса».</p>
-    <div class="chips" id="types">${TYPES.map(
+    <h2>Своя тема</h2>
+    <p class="hint">Выберите, что собрать, и напишите тему так, как сказали бы ученику.</p>
+    <div class="chips scroll" id="types">${TYPES.map(
       ([id, name]) => `<button type="button" class="chip ${state.type === id ? "on" : ""}" data-type="${id}">${name}</button>`
     ).join("")}</div>
-    <form id="ask" class="stack" style="margin-top:12px">
-      <label>Тема<input id="query" value="${esc(state.query)}" required /></label>
-      <label>Класс<input id="grade" value="${esc(state.grade)}" /></label>
-      <div class="stack">${state.books
-        .map(
-          (b) => `<label class="pick"><input type="checkbox" name="bid" value="${b.id}" ${selectedBooks().includes(b.id) ? "checked" : ""} /> ${esc(b.title)} (${esc(b.publisher)})</label>`
-        )
-        .join("")}</div>
-      <p class="err">${esc(state.status)}</p>
+    <form id="ask" class="stack">
+      <label>Тема<textarea id="query" rows="2" required placeholder="Световая фаза фотосинтеза">${esc(state.query)}</textarea></label>
+      <div>
+        <span class="section">Класс</span>
+        <div class="grade-row">
+          <div class="chips" id="grades">${grades
+            .map((g) => `<button type="button" class="chip ${state.grade === g ? "on" : ""}" data-grade="${g}">${g}</button>`)
+            .join("")}</div>
+          <label>Свой<input id="grade" value="${esc(state.grade)}" inputmode="numeric" /></label>
+        </div>
+      </div>
+      <div>
+        <span class="section">Из каких учебников</span>
+        <div class="stack">${
+          state.books.length
+            ? state.books
+                .map(
+                  (b) => `<label class="pick"><input type="checkbox" name="bid" value="${b.id}" ${selectedBooks().includes(b.id) ? "checked" : ""} /><span><b>${esc(b.title)}</b><small>${esc(b.publisher)} · ${esc(b.subject || "")}</small></span></label>`
+                )
+                .join("")
+            : `<p class="hint">Сначала загрузите учебник.</p>`
+        }</div>
+      </div>
+      <div>
+        <span class="section">Заданий в тесте</span>
+        <div class="chips" id="counts">${[5, 8, 10, 12]
+          .map((n) => `<button type="button" class="chip ${Number(state.count) === n ? "on" : ""}" data-count="${n}">${n}</button>`)
+          .join("")}</div>
+      </div>
+      <label class="pick"><input type="checkbox" id="skipCache" ${state.skipCache ? "checked" : ""} /><span><b>Собрать заново</b><small>Не открывать прошлый результат из кэша</small></span></label>
+      <p class="err">${state.busy ? "" : esc(state.status)}</p>
     </form>`;
+}
+
+function aiHtml() {
+  const ai = state.ai || {};
+  return `
+    <h2>Нейросеть</h2>
+    <p class="hint">${
+      ai.ready
+        ? `${esc(ai.name)} подключена: уточняет запрос и собирает тест по найденным страницам.`
+        : "Ключ хранится на сервере и не попадает в чат. Без него тест строится из текста учебника."
+    }</p>
+    <form id="ai" class="stack card">
+      <label>Модель
+        <select name="provider">
+          <option value="gigachat" ${ai.provider !== "yandex" ? "selected" : ""}>GigaChat</option>
+          <option value="yandex" ${ai.provider === "yandex" ? "selected" : ""}>Алиса (YandexGPT)</option>
+        </select>
+      </label>
+      <label>Ключ авторизации<input name="key" type="password" autocomplete="off" placeholder="Кабинет GigaChat или Yandex Cloud" /></label>
+      <label>Каталог Yandex Cloud<input name="folder" value="${esc(ai.folder || "")}" placeholder="Только для Алисы" /></label>
+      <button class="btn" type="submit">Подключить</button>
+      <p class="hint">${esc(state.status)}</p>
+    </form>`;
+}
+
+function resultPanel(pack) {
+  if (state.tab === "sources") return sourcesHtml(pack);
+  if (state.tab === "facts") return factsHtml(pack);
+  if (state.tab === "compare") return compareHtml(pack);
+  const block = pack.materials?.[state.tab];
+  return renderMaterial(state.tab, block);
 }
 
 function resultHtml() {
   const pack = state.pack;
   if (!pack) return `<p class="empty">Материала пока нет.</p>`;
-  const cached = pack.cached ? "Из кэша · " : "";
+  const tabs = tabsFor(pack);
+  if (!tabs.some((t) => t.id === state.tab)) state.tab = tabs.find((t) => t.id !== "sources")?.id || "sources";
+  const [qText, qClass] = qualityLabel(pack.search?.quality ?? 1);
   const notes = [];
-  for (const fx of pack.search?.fixes || []) notes.push(`«${esc(fx.raw)}» → «${esc(fx.suggestion)}»`);
+  for (const fx of pack.search?.fixes || []) notes.push(`«${esc(fx.raw)}» искали как «${esc(fx.suggestion)}»`);
   if ((pack.search?.unknown || []).length) notes.push(`Нет в учебниках: ${pack.search.unknown.map((x) => esc(x)).join(", ")}`);
-  if ((pack.search?.quality ?? 1) < 0.45) notes.push("Тема найдена слабо, проверьте источники");
+  if ((pack.search?.quality ?? 1) < 0.45) notes.push("Тема найдена слабо, откройте источники");
+  if (pack.modelNote) notes.push(esc(pack.modelNote));
+  if (pack.lookups?.length) notes.push(`Модель дополнительно искала: ${pack.lookups.map((q) => esc(q)).join("; ")}`);
+  const pptx = pack.materials?.presentation?.slides?.length
+    ? `<button type="button" class="btn wide" id="exportPptx">Скачать презентацию (PPTX)</button>`
+    : "";
   return `
-    <p class="hint">${cached}${pack.model ? `Тест собрала ${esc(pack.model)} · ` : "Тест из текста учебника · "}${esc(pack.brand?.school || "")}</p>
+    <div class="result-head mat">
+      <h2>${esc(pack.topic || state.query)}</h2>
+      <div class="chips">
+        <span class="chip-info">Страниц: ${(pack.sources || []).length}</span>
+        <span class="chip-info ${qClass}">Совпадение: ${qText}</span>
+        <span class="chip-info">${pack.model ? esc(pack.model) : "Без нейросети"}</span>
+        ${pack.cached ? `<span class="chip-info">Из кэша</span>` : ""}
+      </div>
+    </div>
     ${notes.length ? `<p class="fact mismatch">${notes.join(". ")}</p>` : ""}
-    ${materialsHtml(pack)}
-    ${sourcesHtml(pack)}
-    <h2>Правка на лету</h2>
-    <form id="edit" class="stack">
-      <input id="editText" placeholder="Добавь блок про темновую фазу" />
-      <button class="btn ghost" type="submit">Поправить без новой генерации</button>
-      <p class="hint">${esc(state.status)}</p>
-    </form>`;
+    <div class="tabs">${tabs
+      .map(
+        (t) =>
+          `<button type="button" class="chip ${state.tab === t.id ? "on" : ""}" data-tab="${t.id}">${t.label}${
+            t.count != null ? ` ${t.count}` : ""
+          }${t.warn ? ` · ${t.warn}` : ""}</button>`
+      )
+      .join("")}</div>
+    <div class="mat">${resultPanel(pack)}</div>
+    ${pptx}
+    <details class="fold">
+      <summary>Поправить готовое</summary>
+      <p class="hint">Учебник заново не читается: блок добавится в схему и презентацию.</p>
+      <form id="edit" class="stack">
+        <input id="editText" placeholder="Добавь блок про темновую фазу" />
+        <button class="btn ghost" type="submit">Поправить</button>
+        <p class="hint">${esc(state.status)}</p>
+      </form>
+    </details>`;
 }
 
 function render() {
@@ -452,17 +658,37 @@ function render() {
   if (state.screen === "home") view.innerHTML = homeHtml();
   if (state.screen === "books") view.innerHTML = booksHtml();
   if (state.screen === "ask") view.innerHTML = askHtml();
+  if (state.screen === "ai") view.innerHTML = aiHtml();
   if (state.screen === "result") view.innerHTML = resultHtml();
+  if (state.focusPage) {
+    const card = view.querySelector(`[data-src-page="${CSS.escape(String(state.focusPage))}"]`);
+    state.focusPage = "";
+    card?.scrollIntoView({ block: "start" });
+  }
+  if (state.busy) {
+    view.insertAdjacentHTML(
+      "afterbegin",
+      `<div class="busy" role="status"><i></i><span>${esc(state.status || "Собираю материал…")}</span></div>`
+    );
+  }
   const dock = $("#dock");
-  const showDock = !(inMessenger && hasMain) && (state.screen === "ask" || state.screen === "home");
+  const showDock = !(inMessenger && hasMain) && state.screen === "ask";
   dock.hidden = !showDock;
   dock.innerHTML = showDock
-    ? `<button type="button" id="dockGo">${state.screen === "home" ? "Собрать схему по демо" : "Собрать материал"}</button>`
+    ? `<button type="button" id="dockGo" ${state.busy ? "disabled" : ""}>${state.busy ? "Ищу страницы…" : "Собрать материал"}</button>`
     : "";
   bind();
   syncMainButton();
   const who = $("#who");
-  if (who) who.textContent = inMessenger ? messengerName : "строго по учебнику";
+  const titles = {
+    home: state.ai?.ready ? state.ai.name : inMessenger ? messengerName : "строго по учебнику",
+    ask: "тема и класс",
+    books: "библиотека",
+    ai: state.ai?.ready ? state.ai.name : "без нейросети",
+    result: "готовый материал",
+  };
+  if (who) who.textContent = titles[state.screen] || titles.home;
+  document.body.dataset.screen = state.screen;
 }
 
 function bind() {
@@ -470,26 +696,48 @@ function bind() {
     if (state.screen === "result") go("ask");
     else go("home");
   };
-  $("#demo")?.addEventListener("click", () => {
-    state.query = "фотосинтез, световая фаза";
-    state.grade = "9";
-    state.type = "scheme";
-    generate(false);
+  document.querySelectorAll("[data-ex]").forEach((b) => {
+    b.onclick = () => {
+      state.query = b.dataset.ex;
+      state.grade = b.dataset.grade || state.grade || "9";
+      state.type = "all";
+      generate(false);
+    };
   });
   $("#toAsk")?.addEventListener("click", () => go("ask"));
   $("#toBooks")?.addEventListener("click", () => go("books"));
+  $("#toAi")?.addEventListener("click", () => go("ai"));
   $("#dockGo")?.addEventListener("click", () => {
-    if (state.screen === "home") {
-      state.query = "фотосинтез, световая фаза";
-      state.type = "scheme";
-      generate(false);
-    } else readAskAndGenerate();
+    if (!state.busy) readAskAndGenerate();
   });
   $("#types")?.addEventListener("click", (e) => {
-    const id = e.target.dataset.type;
+    const id = e.target.closest("[data-type]")?.dataset.type;
     if (!id) return;
+    snapshotAsk();
     state.type = id;
     render();
+  });
+  $("#grades")?.addEventListener("click", (e) => {
+    const grade = e.target.closest("[data-grade]")?.dataset.grade;
+    if (!grade) return;
+    snapshotAsk();
+    state.grade = grade;
+    render();
+  });
+  $("#counts")?.addEventListener("click", (e) => {
+    const count = e.target.closest("[data-count]")?.dataset.count;
+    if (!count) return;
+    snapshotAsk();
+    state.count = Number(count);
+    render();
+  });
+  $("#ai")?.addEventListener("submit", saveAi);
+  document.querySelectorAll("[data-page]").forEach((b) => {
+    b.onclick = () => {
+      state.focusPage = b.dataset.page;
+      state.tab = "sources";
+      render();
+    };
   });
   document.querySelectorAll("[data-del]").forEach((b) => {
     b.onclick = () => removeBook(b.dataset.del, b.dataset.title);
@@ -558,7 +806,8 @@ function readAskAndGenerate() {
   state.query = $("#query")?.value || state.query;
   state.grade = $("#grade")?.value || "";
   state.bookIds = [...document.querySelectorAll('input[name="bid"]:checked')].map((i) => i.value);
-  generate(false);
+  state.skipCache = Boolean($("#skipCache")?.checked);
+  generate();
 }
 
 async function removeBook(id, title) {
@@ -597,7 +846,8 @@ async function uploadBook(e) {
 async function saveBrand(e) {
   e.preventDefault();
   const f = e.target;
-  const body = { school: f.school.value, primary: f.primary.value, accent: f.accent.value };
+  const body = { school: f.school.value, primary: f.primary.value, accent: f.accent.value, font: f.font.value };
+  document.documentElement.style.setProperty("--mat-font", body.font || "Georgia");
   state.brand = await (
     await fetch("/api/brand", {
       method: "POST",
@@ -606,6 +856,32 @@ async function saveBrand(e) {
     })
   ).json();
   state.status = "Шаблон сохранён.";
+  render();
+}
+
+async function saveAi(e) {
+  e.preventDefault();
+  const f = e.target;
+  const provider = f.provider.value;
+  const key = f.key.value;
+  const folder = f.folder.value;
+  state.status = "Проверяю ключ…";
+  render();
+  const res = await fetch("/api/ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, key, folder }),
+  });
+  const data = await res.json().catch(() => ({}));
+  state.ai = {
+    ready: Boolean(data.ok && data.ready),
+    name: data.name || state.ai.name,
+    provider,
+    folder: folder || data.folder || "",
+  };
+  state.status = data.ok
+    ? `${data.name} подключена. Тесты собирает модель по страницам учебника.`
+    : data.error || "Не удалось подключить";
   render();
 }
 

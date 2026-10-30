@@ -37,6 +37,7 @@ app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 // Старый адрес мини-приложения: теперь оно живёт на /max/.
 app.get(/^\/tg(\/.*)?$/, (req, res) => res.redirect(301, "/max/"));
+app.get("/", (_req, res) => res.redirect(302, "/max/"));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 const upload = multer({ dest: store.UPLOADS, limits: { fileSize: 80 * 1024 * 1024 } });
