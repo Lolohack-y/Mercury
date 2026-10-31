@@ -1573,6 +1573,13 @@ h2.display {
 
 .tabs::-webkit-scrollbar { display: none; }
 
+@media (min-width: 720px) {
+  .tabs {
+    flex-wrap: wrap;
+    border-radius: var(--r-md);
+  }
+}
+
 .tab {
   display: inline-flex;
   align-items: center;

@@ -395,11 +395,11 @@ function updateAiPill() {
   if (!pill) return;
   const ready = Boolean(state.ai?.ready);
   pill.classList.toggle("on", ready);
-  const label = ready ? `Нейросеть: ${state.ai.name} подключена` : "Нейросеть выключена";
+  const label = ready ? `ИИ подключён: ${state.ai.name}` : "ИИ выключен";
   pill.setAttribute("aria-label", label);
   pill.title = label;
   const text = pill.querySelector(".ai-pill-text");
-  if (text) text.textContent = ready ? state.ai.name : "ИИ";
+  if (text) text.textContent = "ИИ";
 }
 
 async function loadState() {
@@ -431,7 +431,7 @@ async function loadState() {
     state.ai = {
       ready: Boolean(ai.ready),
       name: ai.name || "",
-      provider: ai.provider === "yandex" ? "yandex" : "gigachat",
+      provider: ["yandex", "openai"].includes(ai.provider) ? ai.provider : "gigachat",
       folder: ai.folder || "",
     };
   }
@@ -688,7 +688,6 @@ function homeHtml() {
   const books = state.books.length;
   const pages = state.books.reduce((sum, book) => sum + (Number(book.pages) || 0), 0);
   const recent = recentTopics();
-  const aiLabel = state.ai.ready ? state.ai.name : "выключена";
   const greeting = name ? `${esc(name)}, что нужно <em>к уроку?</em>` : `Что нужно <em>к уроку?</em>`;
 
   return `<section class="hero">
@@ -704,7 +703,7 @@ function homeHtml() {
     <div class="stat-row">
       <span class="stat"><b>${books}</b> ${plural(books, "учебник", "учебника", "учебников")}</span>
       <span class="stat"><b>${pages}</b> ${plural(pages, "страница", "страницы", "страниц")}</span>
-      <span class="stat"><b>${esc(aiLabel)}</b> нейросеть</span>
+      <span class="stat"><b>ИИ</b> ${state.ai.ready ? "подключён" : "выключен"}</span>
       ${state.cacheSize ? `<span class="stat"><b>${state.cacheSize}</b> в кэше</span>` : ""}
     </div>
   </section>
@@ -745,13 +744,13 @@ function homeHtml() {
       </div>
       <div class="ai-status ${state.ai.ready ? "on" : ""}">
         <span class="orb">${ICON.spark}</span>
-        <div><b>${state.ai.ready ? esc(state.ai.name) : "Нейросеть не подключена"}</b><p>${
+        <div><b>${state.ai.ready ? "ИИ подключён" : "ИИ не подключён"}</b><p>${
           state.ai.ready
-            ? "Уточняет запрос и собирает тест по найденным страницам."
+            ? `Провайдер: ${esc(state.ai.name)}. Уточняет запрос и собирает тест по найденным страницам.`
             : "Без ключа тест строится из текста учебника — это тоже работает."
         }</p></div>
       </div>
-      <a class="btn btn-ghost btn-block" href="#/ai">Настроить нейросеть</a>
+      <a class="btn btn-ghost btn-block" href="#/ai">Настроить ИИ</a>
     </aside>
   </div>`;
 }
@@ -945,9 +944,9 @@ function aiHtml() {
     <div class="stack">
       <div class="ai-status ${ai.ready ? "on" : ""}">
         <span class="orb">${ICON.spark}</span>
-        <div><b>${ai.ready ? esc(ai.name) : "Нейросеть не подключена"}</b><p>${
+        <div><b>${ai.ready ? "ИИ подключён" : "ИИ не подключён"}</b><p>${
           ai.ready
-            ? "Подключена: уточняет запрос и собирает тест по найденным страницам."
+            ? `Провайдер: ${esc(ai.name)}. Уточняет запрос и собирает тест по найденным страницам.`
             : "Без ключа тест строится из текста учебника. Это тоже работает — просто без дополнительных формулировок."
         }</p></div>
       </div>
@@ -1751,6 +1750,16 @@ function bindTabs(pack) {
   if (active && list.scrollWidth > list.clientWidth) {
     active.scrollIntoView({ inline: "center", block: "nearest" });
   }
+  list.addEventListener(
+    "wheel",
+    (event) => {
+      if (list.scrollWidth <= list.clientWidth) return;
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      event.preventDefault();
+      list.scrollLeft += event.deltaY;
+    },
+    { passive: false }
+  );
   list.addEventListener("keydown", (event) => {
     const current = event.target.closest("[data-tab]");
     if (!current) return;
