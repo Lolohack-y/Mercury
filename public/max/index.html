@@ -17,7 +17,7 @@
     })();
   </script>
   <script src="https://st.max.ru/js/max-web-app.js"></script>
-  <link rel="stylesheet" href="/max/styles.css?v=20261031f" />
+  <link rel="stylesheet" href="/max/styles.css?v=20261106c" />
 </head>
 <body>
   <a class="skip-link" href="#view">Перейти к содержанию</a>
@@ -37,6 +37,10 @@
       </a>
 
       <div class="top-actions">
+        <button type="button" class="user-chip" id="userChip" data-act="go" data-screen="ai" aria-label="Войти через MAX">
+          <span class="user-initial" id="userInitial" aria-hidden="true">Г</span>
+          <span class="user-role" id="userRole">Гость</span>
+        </button>
         <button type="button" class="ai-pill" id="aiPill" data-act="go" data-screen="ai" aria-label="Нейросеть выключена">
           <span class="dot" aria-hidden="true"></span>
           <span class="ai-pill-text">ИИ</span>
@@ -55,6 +59,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div id="modalRoot"></div>
 
-  <script src="/max/app.js?v=20261031f"></script>
+  <script src="/max/app.js?v=20261106c"></script>
 </body>
 </html>

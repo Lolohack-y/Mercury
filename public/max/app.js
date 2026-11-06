@@ -50,6 +50,13 @@ const ICON = {
   refresh: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>',
   info: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg>',
   alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 3 20h18z"/><path d="M12 9v5M12 17h.01"/></svg>',
+  clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h6M9 3h6v4H9zM7 5H5v16h14V5h-2"/><path d="M8 11h8M8 15h5"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>',
+  check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 10 17 19 7"/></svg>',
+  user: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>',
 };
 
 const state = {
@@ -73,15 +80,163 @@ const state = {
   busy: false,
   busyKind: "",
   status: "",
+  user: null,
+  authChecked: false,
+  stats: null,
+  tests: [],
+  myAttempts: [],
+  testsLoading: false,
+  testDraft: null,
+  publicTest: null,
+  publicTestError: "",
+  publicTestLoading: false,
+  attempt: null,
+  attemptResult: null,
+  testResults: null,
+  testResultsLoading: false,
+  testResultsError: "",
+  editorBusy: false,
 };
 
 let genTimer = null;
 let toastTimer = null;
+let attemptTimer = null;
 let lastFocus = null;
 const dockMedia = window.matchMedia("(max-width: 719px)");
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  if (bridge?.initData) headers["X-Max-Init-Data"] = bridge.initData;
+  return headers;
+}
+
+async function api(path, options = {}) {
+  const headers = authHeaders(options.headers || {});
+  if (typeof options.body === "string" && !headers["Content-Type"] && !headers["content-type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const response = await fetch(path, {
+    credentials: "include",
+    ...options,
+    headers,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || `Ошибка ${response.status}`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+function normalizeAi(value) {
+  const ai = value && typeof value === "object" ? value : {};
+  const quota = ai.quota && typeof ai.quota === "object" ? ai.quota : null;
+  return {
+    ready: Boolean(ai.ready),
+    name: ai.name || "",
+    provider: ["yandex", "openai"].includes(ai.provider) ? ai.provider : "gigachat",
+    folder: ai.folder || "",
+    authenticated: Boolean(ai.authenticated),
+    role: ai.role || "guest",
+    source: ai.source || "none",
+    ownKey: Boolean(ai.ownKey),
+    ownProviders: Array.isArray(ai.ownProviders) ? ai.ownProviders : [],
+    pool: ai.pool && typeof ai.pool === "object" ? ai.pool : { keys: 0, providers: [] },
+    quota,
+    reason: ai.reason || "",
+  };
+}
+
+function isTeacher(user = state.user) {
+  return ["teacher", "admin"].includes(String(user?.role || ""));
+}
+
+function roleLabel(role) {
+  return role === "admin" ? "Администратор" : role === "teacher" ? "Учитель" : role === "student" ? "Ученик" : "Гость";
+}
+
+function moscowWhen(iso, withYear = false) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    day: "2-digit",
+    month: "2-digit",
+    ...(withYear ? { year: "numeric" } : {}),
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  if (!total) return "0 с";
+  if (total < 60) return `${Math.round(total)} с`;
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) return `${minutes} мин`;
+  return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+}
+
+function shareUrl(token) {
+  return `${location.origin}/max/#/t/${encodeURIComponent(token)}`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Ссылка скопирована");
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+      toast("Ссылка скопирована");
+    } catch {
+      toast("Скопируйте ссылку вручную", "error");
+    }
+    area.remove();
+  }
+  haptic("light");
+}
+
+async function refreshAuth() {
+  try {
+    const data = await api("/api/auth/me");
+    state.user = data.authenticated ? data.user : null;
+    state.ai = normalizeAi(data.ai);
+  } catch {
+    state.user = null;
+  }
+  state.authChecked = true;
+  updateChrome();
+}
+
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    /* сессия уже закрыта */
+  }
+  state.user = null;
+  state.ai = normalizeAi(null);
+  state.tests = [];
+  state.myAttempts = [];
+  state.testDraft = null;
+  state.testResults = null;
+  state.stats = null;
+  toast("Вы вышли из аккаунта");
+  render();
+}
 
 function esc(value) {
   return String(value ?? "")
@@ -404,14 +559,9 @@ function updateAiPill() {
 
 async function loadState() {
   let bootError = "";
-  const [stateResult, aiResult] = await Promise.allSettled([
-    fetch("/api/state", { headers: { Accept: "application/json" } }).then((response) => {
-      if (!response.ok) throw new Error(`Сервер вернул ${response.status}`);
-      return response.json();
-    }),
-    fetch("/api/ai", { headers: { Accept: "application/json" } })
-      .then((response) => (response.ok ? response.json() : null))
-      .catch(() => null),
+  const [stateResult, meResult] = await Promise.allSettled([
+    api("/api/state", { headers: { Accept: "application/json" } }),
+    api("/api/auth/me", { headers: { Accept: "application/json" } }),
   ]);
 
   if (stateResult.status === "fulfilled") {
@@ -426,16 +576,18 @@ async function loadState() {
     bootError = stateResult.reason?.message || "Сервер не отвечает";
   }
 
-  if (aiResult.status === "fulfilled" && aiResult.value) {
-    const ai = aiResult.value;
-    state.ai = {
-      ready: Boolean(ai.ready),
-      name: ai.name || "",
-      provider: ["yandex", "openai"].includes(ai.provider) ? ai.provider : "gigachat",
-      folder: ai.folder || "",
-    };
+  if (meResult.status === "fulfilled" && meResult.value) {
+    state.user = meResult.value.authenticated ? meResult.value.user : null;
+    state.ai = normalizeAi(meResult.value.ai);
+  } else {
+    try {
+      state.ai = normalizeAi(await api("/api/ai"));
+    } catch {
+      state.ai = normalizeAi(null);
+    }
   }
 
+  state.authChecked = true;
   state.bootError = bootError;
   state.loading = false;
   applyBrandFont();
@@ -447,7 +599,9 @@ async function loadState() {
 function parseRoute() {
   const raw = String(location.hash || "").replace(/^#\/?/, "");
   const parts = raw.split("/").filter(Boolean);
-  const screen = ["home", "books", "ask", "ai", "result"].includes(parts[0]) ? parts[0] : "home";
+  if (parts[0] === "t") return { screen: "t", token: decodeURIComponent(parts[1] || "") };
+  if (parts[0] === "test") return { screen: "test", id: decodeURIComponent(parts[1] || "") };
+  const screen = ["home", "books", "ask", "ai", "result", "tests"].includes(parts[0]) ? parts[0] : "home";
   return {
     screen,
     tab: screen === "result" && parts[1] ? decodeURIComponent(parts[1]) : "",
@@ -455,7 +609,7 @@ function parseRoute() {
 }
 
 function navigate(screen) {
-  const next = ["home", "books", "ask", "ai"].includes(screen) ? screen : "home";
+  const next = ["home", "books", "ask", "ai", "tests"].includes(screen) ? screen : "home";
   state.screen = next;
   state.status = "";
   const hash = `#/${next}`;
@@ -496,6 +650,26 @@ function applyRoute({ focus = false } = {}) {
     state.status = "";
     state.slide = 0;
   }
+  if (route.screen === "t") {
+    if (state.publicTest && state.publicTest.shareToken !== route.token) {
+      state.publicTest = null;
+      state.attempt = null;
+      state.attemptResult = null;
+      state.publicTestError = "";
+    }
+    if (!state.publicTestLoading && (!state.publicTest || state.publicTest.shareToken !== route.token)) {
+      loadPublicTest(route.token);
+    }
+  }
+  if (route.screen === "test") {
+    if (state.testResults?.test?.id !== route.id) state.testResults = null;
+    if (!state.testResultsLoading && (!state.testResults || state.testResults.test?.id !== route.id)) {
+      loadTestResults(route.id);
+    }
+  }
+  if (route.screen === "tests" && !state.testsLoading && state.user) {
+    loadTests();
+  }
   render();
   if (focus && previous !== route.screen) focusView();
 }
@@ -525,6 +699,12 @@ function render() {
     view.innerHTML = askHtml();
   } else if (state.screen === "ai") {
     view.innerHTML = aiHtml();
+  } else if (state.screen === "tests") {
+    view.innerHTML = testsHtml();
+  } else if (state.screen === "t") {
+    view.innerHTML = testTakeHtml();
+  } else if (state.screen === "test") {
+    view.innerHTML = testResultsHtml();
   } else {
     view.innerHTML = resultHtml();
   }
@@ -537,6 +717,9 @@ function render() {
     if (state.screen === "ask") bindAsk();
     if (state.screen === "ai") bindAi();
     if (state.screen === "result") bindResult();
+    if (state.screen === "tests") bindTests();
+    if (state.screen === "t") bindTestTake();
+    if (state.screen === "test") bindTestResults();
   }
 
   if (generating) startGenTicker();
@@ -552,10 +735,26 @@ function updateChrome() {
     home: "строго по учебнику",
     ask: "тема и класс",
     books: "библиотека",
-    ai: "нейросеть",
+    ai: "нейросеть и доступ",
     result: "готовый материал",
+    tests: "тесты и результаты",
+    t: "прохождение теста",
+    test: "результаты теста",
   };
   if (who) who.textContent = state.busy && state.busyKind === "generate" ? "собираю материал" : titles[state.screen] || titles.home;
+
+  const chip = $("#userChip");
+  const initial = $("#userInitial");
+  const role = $("#userRole");
+  if (chip) {
+    const user = state.user;
+    chip.classList.toggle("authed", Boolean(user));
+    chip.classList.toggle("teacher", isTeacher(user));
+    chip.setAttribute("aria-label", user ? `${user.name}, ${roleLabel(user.role)}` : "Войти через MAX");
+    chip.title = user ? `${user.name} · ${roleLabel(user.role)}` : "Войти через MAX";
+  }
+  if (initial) initial.textContent = state.user ? String(state.user.name || "Я").trim().charAt(0).toUpperCase() : "Г";
+  if (role) role.textContent = state.user ? roleLabel(state.user.role) : "Гость";
 
   const dock = $("#dock");
   const showDock = state.screen === "ask" && !state.busy && !(inMessenger && hasMain) && dockMedia.matches;
@@ -577,10 +776,19 @@ function updateDocumentTitle() {
     home: "Наглядность+ — материалы по учебнику",
     books: "Учебники — Наглядность+",
     ask: "Новая тема — Наглядность+",
-    ai: "Нейросеть — Наглядность+",
+    ai: "ИИ и доступ — Наглядность+",
+    tests: "Тесты — Наглядность+",
+    t: "Тест — Наглядность+",
+    test: "Результаты теста — Наглядность+",
   };
   document.title =
-    state.screen === "result" && state.pack?.topic ? `${state.pack.topic} — Наглядность+` : titles[state.screen] || titles.home;
+    state.screen === "result" && state.pack?.topic
+      ? `${state.pack.topic} — Наглядность+`
+      : state.screen === "t" && state.publicTest?.title
+        ? `${state.publicTest.title} — Наглядность+`
+        : state.screen === "test" && state.testResults?.test?.title
+          ? `${state.testResults.test.title} — результаты`
+          : titles[state.screen] || titles.home;
 }
 
 function stopGenTicker() {
@@ -684,26 +892,56 @@ function resumeHtml() {
 }
 
 function homeHtml() {
-  const name = bridge?.initDataUnsafe?.user?.first_name || bridge?.initDataUnsafe?.user?.name || "";
+  const name = state.user?.name || bridge?.initDataUnsafe?.user?.first_name || bridge?.initDataUnsafe?.user?.name || "";
   const books = state.books.length;
   const pages = state.books.reduce((sum, book) => sum + (Number(book.pages) || 0), 0);
   const recent = recentTopics();
   const greeting = name ? `${esc(name)}, что нужно <em>к уроку?</em>` : `Что нужно <em>к уроку?</em>`;
+  const ai = state.ai;
+  const quota = ai.quota;
+  const teacher = isTeacher();
+  const aiTitle = ai.ready ? (ai.ownKey ? "ИИ: свой ключ" : "ИИ подключён") : "ИИ не подключён";
+  const aiText = !state.user
+    ? "Войдите через MAX, чтобы получить ИИ и роль учителя. Без ИИ материалы собираются из текста учебника."
+    : ai.ownKey
+      ? `Свой ключ${ai.name ? ` (${ai.name})` : ""}: без дневного лимита.`
+      : ai.ready
+        ? `Общий ключ: осталось ${quota?.remaining ?? 0} из ${quota?.limit ?? 0} запросов сегодня.`
+        : "Общий ключ ещё не настроен. Материалы собираются из текста учебника.";
+  const aiStat = ai.ownKey
+    ? `<span class="stat"><b>ИИ</b> свой ключ</span>`
+    : ai.ready && quota
+      ? `<span class="stat"><b>${quota.remaining ?? 0}</b> ${plural(quota.remaining ?? 0, "запрос", "запроса", "запросов")} ИИ</span>`
+      : `<span class="stat"><b>ИИ</b> ${ai.ready ? "подключён" : "выключен"}</span>`;
+  const account = state.user
+    ? `<div class="card account-card">
+        <span class="kicker">Аккаунт</span>
+        <div class="account-row"><span class="avatar">${esc(String(state.user.name || "Я").trim().charAt(0).toUpperCase())}</span><div><b>${esc(
+          state.user.name
+        )}</b><small>${roleLabel(state.user.role)} · MAX</small></div></div>
+        <a class="btn btn-ghost btn-block" href="#/ai">${ICON.spark} Настройки ИИ</a>
+      </div>`
+    : `<div class="card account-card">
+        <span class="kicker">Аккаунт</span>
+        <p class="small muted">Гость. Откройте приложение в MAX — аккаунт подтянется автоматически, без регистрации.</p>
+        <a class="btn btn-ghost btn-block" href="#/ai">${ICON.user} Войти через MAX</a>
+      </div>`;
 
   return `<section class="hero">
     <div class="hero-copy">
-      <span class="kicker">Для учителя</span>
+      <span class="kicker">${teacher ? "Для учителя" : state.user ? "Для ученика" : "Наглядность+"}</span>
       <h1 class="display">${greeting}</h1>
       <p class="lede">Схема, таблица, карточки, презентация и тест — строго по страницам загруженного учебника. Без выдуманных фактов.</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#/ask">${ICON.spark} Собрать материал</a>
         <a class="btn btn-ghost" href="#/books">${ICON.book} Учебники <span class="count">${books}</span></a>
+        <a class="btn btn-ghost" href="#/tests">${ICON.clipboard} Тесты</a>
       </div>
     </div>
     <div class="stat-row">
       <span class="stat"><b>${books}</b> ${plural(books, "учебник", "учебника", "учебников")}</span>
       <span class="stat"><b>${pages}</b> ${plural(pages, "страница", "страницы", "страниц")}</span>
-      <span class="stat"><b>ИИ</b> ${state.ai.ready ? "подключён" : "выключен"}</span>
+      ${aiStat}
       ${state.cacheSize ? `<span class="stat"><b>${state.cacheSize}</b> в кэше</span>` : ""}
     </div>
   </section>
@@ -734,6 +972,7 @@ function homeHtml() {
       <p class="small muted">Демо-учебники уже в индексе. Повтор того же запроса открывается сразу.</p>
     </div>
     <aside class="stack">
+      ${account}
       <div class="card">
         <span class="kicker">Как это работает</span>
         <ol class="how">
@@ -771,12 +1010,15 @@ function bookCard(book) {
   ]
     .filter(Boolean)
     .join(" · ");
+  const remove = isTeacher()
+    ? `<button type="button" class="icon-btn del" data-del="${esc(book.id)}" aria-label="Удалить учебник «${esc(
+        book.title || "Без названия"
+      )}»">${ICON.trash}</button>`
+    : "";
   return `<article class="book">
     <span class="book-cover" aria-hidden="true">${bookCover(book)}</span>
     <div class="book-info"><b>${esc(book.title || "Без названия")}</b><small>${esc(meta || "Учебник")}</small></div>
-    <button type="button" class="icon-btn del" data-del="${esc(book.id)}" aria-label="Удалить учебник «${esc(
-      book.title || "Без названия"
-    )}»">${ICON.trash}</button>
+    ${remove}
   </article>`;
 }
 
@@ -812,7 +1054,9 @@ function booksHtml() {
       ${list}
     </section>
     <aside class="stack">
-      <form id="up" class="card stack" enctype="multipart/form-data" novalidate>
+      ${
+        isTeacher()
+          ? `<form id="up" class="card stack" enctype="multipart/form-data" novalidate>
         <div class="section-head"><h2>Добавить учебник</h2><span>до 80 МБ</span></div>
         <label class="file-field">
           <b>Файл учебника</b>
@@ -845,7 +1089,19 @@ function booksHtml() {
             <button class="btn btn-ghost" type="submit">Сохранить для всех материалов</button>
           </form>
         </div>
-      </details>
+      </details>`
+          : `<div class="card stack">
+        <span class="kicker">Библиотека школы</span>
+        <p class="small muted">${
+          state.user
+            ? "Загружать и удалять учебники может учитель. Материалы собираются по этой библиотеке."
+            : "Откройте приложение в MAX, чтобы получить аккаунт. Загружать учебники может учитель."
+        }</p>
+        <a class="btn btn-ghost btn-block" href="#/ai">${state.user ? ICON.user : ICON.lock} ${
+              state.user ? "Аккаунт" : "Войти"
+            }</a>
+      </div>`
+      }
     </aside>
   </div>`;
 }
@@ -934,48 +1190,49 @@ function askHtml() {
 /* ───────────── нейросеть ───────────── */
 
 function aiHtml() {
-  const ai = state.ai || {};
+  const ai = state.ai || normalizeAi(null);
+  const user = state.user;
+  const teacher = isTeacher();
   return `<header class="page-head">
-    <span class="kicker">Нейросеть</span>
+    <span class="kicker">ИИ и доступ</span>
     <h1 class="display">Умный помощник</h1>
-    <p class="lede">Модель уточняет формулировку темы и собирает тест по найденным страницам. Ключ хранится на сервере.</p>
+    <p class="lede">ИИ уточняет формулировку и собирает тест по найденным страницам. Вход нужен для ИИ и роли учителя, материалы собираются и без него.</p>
   </header>
   <div class="home-grid">
     <div class="stack">
+      ${user ? accountCardHtml() : loginCardHtml()}
       <div class="ai-status ${ai.ready ? "on" : ""}">
         <span class="orb">${ICON.spark}</span>
         <div><b>${ai.ready ? "ИИ подключён" : "ИИ не подключён"}</b><p>${
-          ai.ready
-            ? `Провайдер: ${esc(ai.name)}. Уточняет запрос и собирает тест по найденным страницам.`
-            : "Без ключа тест строится из текста учебника. Это тоже работает — просто без дополнительных формулировок."
+          !user
+            ? "Войдите через MAX, чтобы использовать ИИ. Без входа доступны схемы, карточки и тесты из текста учебника."
+            : ai.ready
+              ? `Провайдер: ${esc(ai.name || "ИИ")}. ${
+                  ai.ownKey ? "Используется ваш ключ." : "Используется общий пул ключей."
+                }`
+              : "Нет доступного ключа. Материалы собираются из текста учебника."
         }</p></div>
       </div>
-      <form id="ai" class="card stack">
-        <div class="section-head"><h2>Подключение</h2><span>ключ не попадает в чат</span></div>
-        <label class="field"><span>Модель</span><select class="select" name="provider">
-          <option value="gigachat" ${ai.provider !== "yandex" ? "selected" : ""}>GigaChat</option>
-          <option value="yandex" ${ai.provider === "yandex" ? "selected" : ""}>Алиса (YandexGPT)</option>
-        </select></label>
-        <label class="field"><span>Ключ авторизации</span><input class="input" name="key" type="password" autocomplete="off" placeholder="Кабинет GigaChat или Yandex Cloud" /><small>Для GigaChat — Basic-ключ, для Алисы — Api-Key.</small></label>
-        <label class="field"><span>Каталог Yandex Cloud</span><input class="input" name="folder" value="${esc(
-          ai.folder || ""
-        )}" placeholder="Только для Алисы" autocomplete="off" /><small>Идентификатор каталога в Yandex Cloud.</small></label>
-        <button class="btn btn-primary" type="submit">${ICON.spark} Подключить</button>
-        <p class="small muted" id="aiStatus" role="status" aria-live="polite">${esc(state.status)}</p>
-      </form>
+      ${user ? quotaBarHtml(ai) : ""}
+      ${user ? aiKeyFormHtml(ai) : ""}
+      ${teacher ? statsCardHtml() : ""}
     </div>
     <aside class="stack">
       <div class="card inset">
-        <span class="kicker">Что меняется</span>
+        <span class="kicker">Как работает доступ</span>
         <ol class="how">
-          <li><b>Запрос</b>Модель уточняет тему и ищет близкие формулировки.</li>
-          <li><b>Тест</b>Задания собираются по найденным страницам, а не из головы.</li>
-          <li><b>Без ключа</b>Схема, карточки и тест всё равно собираются из текста.</li>
+          <li><b>MAX</b>Аккаунт подтягивается автоматически. Регистрация не нужна.</li>
+          <li><b>Роли</b>Ученик — по умолчанию. Учителя и администратора назначает админ через базу или бота.</li>
+          <li><b>Лимит</b>5 запросов ИИ в день. Свой ключ в настройках снимает ограничение.</li>
         </ol>
       </div>
       <div class="card">
+        <span class="kicker">Общий пул</span>
+        <p class="small muted">Если один ключ исчерпал лимит, сервер переключается на следующий доступный. Запросы и ошибки учитываются в статистике.</p>
+      </div>
+      <div class="card">
         <span class="kicker">Безопасность</span>
-        <p class="small muted">Ключ отправляется на ваш сервер и сохраняется в файле настроек. В браузер и в чат он не возвращается.</p>
+        <p class="small muted">Ключи хранятся на сервере в зашифрованном виде и не возвращаются в браузер.</p>
       </div>
     </aside>
   </div>`;
@@ -1794,6 +2051,8 @@ function focusSource(page) {
 function bindCommon() {
   $("#themeBtn")?.addEventListener("click", toggleTheme);
   $("#back")?.addEventListener("click", goBack);
+  $("#loginForm")?.addEventListener("submit", loginWithCode);
+  $$("[data-logout]").forEach((button) => button.addEventListener("click", logout));
   $$("[data-act='go']").forEach((element) => {
     element.addEventListener("click", () => navigate(element.dataset.screen || "home"));
   });
@@ -1893,6 +2152,10 @@ function bindBooks() {
 
 function bindAi() {
   $("#ai")?.addEventListener("submit", saveAi);
+  $$("[data-ai-remove]").forEach((button) =>
+    button.addEventListener("click", () => removeAiKey(button.dataset.aiRemove))
+  );
+  if (isTeacher()) loadStats();
 }
 
 function bindResult() {
@@ -1907,6 +2170,1418 @@ function bindResult() {
     const input = $("#editText");
     editPack(input?.value.trim() || "");
   });
+}
+
+/* ───────────── тесты учителя ───────────── */
+
+const TEST_TYPES = [
+  ["choice", "Один ответ"],
+  ["multi", "Несколько ответов"],
+  ["judge", "Верно / неверно"],
+  ["order", "Последовательность"],
+  ["open", "Открытый ответ"],
+  ["match", "Пары"],
+];
+
+function providerName(id) {
+  return id === "yandex" ? "Алиса" : id === "openai" ? "OpenAI" : "GigaChat";
+}
+
+function blankQuestion(type = "choice") {
+  const question = {
+    id: "",
+    type,
+    q: "",
+    options: [],
+    answer: 0,
+    points: 1,
+    sample: "",
+    keywords: [],
+    left: [],
+    right: [],
+  };
+  if (type === "choice" || type === "multi" || type === "order") question.options = ["", ""];
+  if (type === "multi") question.answer = [];
+  if (type === "order") question.answer = [0, 1];
+  if (type === "open") question.answer = null;
+  if (type === "match") {
+    question.left = ["", ""];
+    question.right = ["", ""];
+    question.answer = [0, 1];
+  }
+  return question;
+}
+
+function ensureQuestionShape(question) {
+  if (!question || typeof question !== "object") return blankQuestion();
+  if (!TEST_TYPES.some(([id]) => id === question.type)) question.type = "choice";
+  question.points = Math.max(1, Math.min(20, Number(question.points) || 1));
+  if (question.type === "choice" || question.type === "multi" || question.type === "order") {
+    if (!Array.isArray(question.options)) question.options = [];
+    while (question.options.length < 2) question.options.push("");
+    if (question.type === "choice") {
+      const answer = Number(question.answer);
+      question.answer = Number.isInteger(answer) && answer >= 0 && answer < question.options.length ? answer : 0;
+    } else if (question.type === "multi") {
+      question.answer = Array.isArray(question.answer)
+        ? [...new Set(question.answer.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < question.options.length))]
+        : [];
+    } else {
+      question.answer = question.options.map((_, index) => index);
+    }
+  }
+  if (question.type === "judge") question.answer = Number(question.answer) === 1 ? 1 : 0;
+  if (question.type === "open") {
+    question.answer = null;
+    if (!Array.isArray(question.keywords)) question.keywords = [];
+  }
+  if (question.type === "match") {
+    if (!Array.isArray(question.left)) question.left = [];
+    if (!Array.isArray(question.right)) question.right = [];
+    while (question.left.length < 2) question.left.push("");
+    while (question.right.length < 2) question.right.push("");
+    question.answer = question.left.map((_, index) => index);
+  }
+  return question;
+}
+
+function toMoscowInput(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Moscow",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  const hour = get("hour") === "24" ? "00" : get("hour");
+  return `${get("year")}-${get("month")}-${get("day")}T${hour}:${get("minute")}`;
+}
+
+function fromMoscowInput(value) {
+  if (!value) return null;
+  const date = new Date(`${value}:00+03:00`);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function newTestDraft() {
+  return {
+    id: "",
+    title: "",
+    subject: "",
+    grade: "",
+    description: "",
+    settings: {
+      attempts: 1,
+      deadline: "",
+      shuffleQuestions: true,
+      shuffleOptions: true,
+      showAnswers: false,
+      timeLimitMin: 0,
+    },
+    questions: [blankQuestion("choice")],
+  };
+}
+
+function draftFromTest(test) {
+  return {
+    id: test.id || "",
+    title: test.title || "",
+    subject: test.subject || "",
+    grade: test.grade || "",
+    description: test.description || "",
+    settings: {
+      attempts: Number(test.settings?.attempts) || 1,
+      deadline: toMoscowInput(test.settings?.deadline),
+      shuffleQuestions: test.settings?.shuffleQuestions !== false,
+      shuffleOptions: test.settings?.shuffleOptions !== false,
+      showAnswers: Boolean(test.settings?.showAnswers),
+      timeLimitMin: Number(test.settings?.timeLimitMin) || 0,
+    },
+    questions: (test.questions || []).map((question) =>
+      ensureQuestionShape({
+        id: question.id || "",
+        type: question.type || "choice",
+        q: question.q || "",
+        options: Array.isArray(question.options) ? [...question.options] : [],
+        answer: Array.isArray(question.answer) ? [...question.answer] : question.answer ?? 0,
+        points: Number(question.points) || 1,
+        sample: question.sample || "",
+        keywords: Array.isArray(question.keywords) ? [...question.keywords] : [],
+        left: Array.isArray(question.left) ? [...question.left] : [],
+        right: Array.isArray(question.right) ? [...question.right] : [],
+      })
+    ),
+  };
+}
+
+function typeOptionsHtml(current) {
+  return TEST_TYPES.map(
+    ([id, label]) => `<option value="${id}" ${id === current ? "selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+function optionRowsHtml(question, qi) {
+  const rows = question.options
+    .map((option, oi) => {
+      let mark = "";
+      if (question.type === "choice") {
+        mark = `<input type="radio" name="ans-${qi}" data-field="answer" data-qi="${qi}" data-oi="${oi}" ${
+          Number(question.answer) === oi ? "checked" : ""
+        } aria-label="Верный вариант ${oi + 1}" />`;
+      } else if (question.type === "multi") {
+        mark = `<input type="checkbox" data-field="answer" data-qi="${qi}" data-oi="${oi}" ${
+          Array.isArray(question.answer) && question.answer.includes(oi) ? "checked" : ""
+        } aria-label="Верный вариант ${oi + 1}" />`;
+      } else {
+        mark = `<span class="ord-no" aria-hidden="true">${oi + 1}</span>`;
+      }
+      return `<div class="opt-row">${mark}<input class="input" data-field="opt" data-qi="${qi}" data-oi="${oi}" value="${esc(
+        option
+      )}" placeholder="Вариант ${oi + 1}" /><button type="button" class="icon-btn" data-qact="del-opt" data-qi="${qi}" data-oi="${oi}" aria-label="Удалить вариант">${
+        ICON.trash
+      }</button></div>`;
+    })
+    .join("");
+  return `<div class="opt-list">${rows}</div><button type="button" class="btn btn-ghost btn-sm" data-qact="add-opt" data-qi="${qi}">${
+    ICON.plus
+  } Вариант</button>`;
+}
+
+function matchRowsHtml(question, qi) {
+  const rows = question.left
+    .map(
+      (left, oi) => `<div class="match-row">
+        <input class="input" data-field="left" data-qi="${qi}" data-oi="${oi}" value="${esc(left)}" placeholder="Слева ${
+        oi + 1
+      }" />
+        <span class="match-arrow" aria-hidden="true">→</span>
+        <input class="input" data-field="right" data-qi="${qi}" data-oi="${oi}" value="${esc(
+          question.right?.[oi] || ""
+        )}" placeholder="Справа ${oi + 1}" />
+        <button type="button" class="icon-btn" data-qact="del-pair" data-qi="${qi}" data-oi="${oi}" aria-label="Удалить пару">${
+          ICON.trash
+        }</button>
+      </div>`
+    )
+    .join("");
+  return `<div class="match-editor">${rows}</div><button type="button" class="btn btn-ghost btn-sm" data-qact="add-pair" data-qi="${qi}">${
+    ICON.plus
+  } Пара</button>`;
+}
+
+function questionEditorHtml(question, qi) {
+  const type = question.type || "choice";
+  const options = ["choice", "multi", "order"].includes(type)
+    ? `${optionRowsHtml(question, qi)}<small class="small muted">${
+        type === "choice"
+          ? "Отметьте один верный вариант."
+          : type === "multi"
+            ? "Отметьте все верные варианты."
+            : "Перечислите варианты в правильном порядке — ученик увидит их перемешанными."
+      }</small>`
+    : "";
+  const judge =
+    type === "judge"
+      ? `<label class="field"><span>Верный ответ</span><select class="select" data-field="judge" data-qi="${qi}"><option value="0" ${
+          Number(question.answer) === 0 ? "selected" : ""
+        }>Верно</option><option value="1" ${Number(question.answer) === 1 ? "selected" : ""}>Неверно</option></select></label>`
+      : "";
+  const open =
+    type === "open"
+      ? `<div class="field-grid two">
+          <label class="field"><span>Образец ответа</span><textarea class="textarea" rows="2" data-field="sample" data-qi="${qi}" placeholder="Полный ответ">${esc(
+            question.sample || ""
+          )}</textarea></label>
+          <label class="field"><span>Ключевые слова</span><input class="input" data-field="keywords" data-qi="${qi}" value="${esc(
+            (question.keywords || []).join(", ")
+          )}" placeholder="хлорофилл, хлоропласт" /><small>Через запятую. Достаточно половины совпадений.</small></label>
+        </div>`
+      : "";
+  const match = type === "match" ? matchRowsHtml(question, qi) : "";
+  return `<article class="q-editor card" data-qi="${qi}">
+    <div class="q-editor-head">
+      <span class="q-no">${qi + 1}</span>
+      <select class="select" data-field="type" data-qi="${qi}" aria-label="Тип задания">${typeOptionsHtml(type)}</select>
+      <label class="q-points-field"><span>Баллы</span><input class="input" type="number" min="1" max="20" data-field="points" data-qi="${qi}" value="${
+        Number(question.points) || 1
+      }" /></label>
+      <span class="q-tools">
+        <button type="button" class="icon-btn" data-qact="up" data-qi="${qi}" aria-label="Выше">↑</button>
+        <button type="button" class="icon-btn" data-qact="down" data-qi="${qi}" aria-label="Ниже">↓</button>
+        <button type="button" class="icon-btn" data-qact="remove" data-qi="${qi}" aria-label="Удалить задание">${
+          ICON.trash
+        }</button>
+      </span>
+    </div>
+    <label class="field"><span>Задание</span><textarea class="textarea" rows="2" data-field="q" data-qi="${qi}" placeholder="Текст вопроса">${esc(
+      question.q || ""
+    )}</textarea></label>
+    ${options}${judge}${open}${match}
+  </article>`;
+}
+
+function testEditorHtml() {
+  const draft = state.testDraft;
+  const editing = Boolean(draft.id);
+  return `<header class="page-head">
+    <button type="button" class="link-back" data-editor-cancel>${ICON.left} К тестам</button>
+    <span class="kicker">${editing ? "Редактирование" : "Новый тест"}</span>
+    <h1 class="display">${editing ? "Изменить тест" : "Свой тест"}</h1>
+    <p class="lede">Вопросы и варианты перемешиваются при каждой попытке. Дедлайн указывается по Москве.</p>
+  </header>
+  <form id="testEditor" class="stack" novalidate>
+    <div class="card stack">
+      <div class="section-head"><h2>Основное</h2><span>${draft.questions.length} ${plural(
+        draft.questions.length,
+        "задание",
+        "задания",
+        "заданий"
+      )}</span></div>
+      <label class="field"><span>Название</span><input class="input" data-field="title" value="${esc(
+        draft.title
+      )}" placeholder="Контрольная по фотосинтезу" required /></label>
+      <div class="field-grid two">
+        <label class="field"><span>Предмет</span><input class="input" data-field="subject" value="${esc(
+          draft.subject
+        )}" placeholder="Биология" /></label>
+        <label class="field"><span>Класс</span><input class="input" data-field="grade" value="${esc(
+          draft.grade
+        )}" placeholder="9" inputmode="numeric" /></label>
+      </div>
+      <label class="field"><span>Описание</span><textarea class="textarea" rows="2" data-field="description" placeholder="Что проверяет тест">${esc(
+        draft.description
+      )}</textarea></label>
+    </div>
+    <div class="card stack">
+      <div class="section-head"><h2>Параметры</h2><span>для всех учеников</span></div>
+      <div class="field-grid two">
+        <label class="field"><span>Попыток на ученика</span><input class="input" type="number" min="1" max="20" data-field="attempts" value="${
+          Number(draft.settings.attempts) || 1
+        }" /></label>
+        <label class="field"><span>Время на попытку, мин</span><input class="input" type="number" min="0" max="300" data-field="timeLimitMin" value="${
+          Number(draft.settings.timeLimitMin) || 0
+        }" /><small>0 — без ограничения.</small></label>
+      </div>
+      <label class="field"><span>Дедлайн по МСК</span><input class="input" type="datetime-local" data-field="deadline" value="${esc(
+        draft.settings.deadline || ""
+      )}" /><small>После дедлайна тест закрывается, учителю уходит отчёт в MAX.</small></label>
+      <div class="switch-list">
+        <label class="switch"><input type="checkbox" data-field="shuffleQuestions" ${
+          draft.settings.shuffleQuestions ? "checked" : ""
+        } /><span class="track" aria-hidden="true"></span><span class="switch-text"><b>Перемешивать вопросы</b><small>Порядок меняется в каждой попытке</small></span></label>
+        <label class="switch"><input type="checkbox" data-field="shuffleOptions" ${
+          draft.settings.shuffleOptions ? "checked" : ""
+        } /><span class="track" aria-hidden="true"></span><span class="switch-text"><b>Перемешивать варианты</b><small>Ответы тоже идут вразнобой</small></span></label>
+        <label class="switch"><input type="checkbox" data-field="showAnswers" ${
+          draft.settings.showAnswers ? "checked" : ""
+        } /><span class="track" aria-hidden="true"></span><span class="switch-text"><b>Показывать ответы</b><small>Ученик увидит разбор после сдачи</small></span></label>
+      </div>
+    </div>
+    <div class="section-head"><h2>Задания</h2><span>${draft.questions.length}</span></div>
+    <div class="stack">${draft.questions.map(questionEditorHtml).join("")}</div>
+    <button type="button" class="btn btn-ghost btn-block" data-qact="add">${ICON.plus} Добавить задание</button>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">${ICON.check} ${editing ? "Сохранить" : "Создать тест"}</button>
+      <button class="btn btn-ghost" type="button" data-editor-cancel>Отмена</button>
+    </div>
+  </form>`;
+}
+
+function readDraftForm() {
+  const draft = state.testDraft;
+  if (!draft) return;
+  const value = (selector) => $(selector)?.value ?? "";
+  draft.title = value('[data-field="title"]');
+  draft.subject = value('[data-field="subject"]');
+  draft.grade = value('[data-field="grade"]');
+  draft.description = value('[data-field="description"]');
+  draft.settings.attempts = Number(value('[data-field="attempts"]')) || 1;
+  draft.settings.timeLimitMin = Number(value('[data-field="timeLimitMin"]')) || 0;
+  draft.settings.deadline = value('[data-field="deadline"]');
+  draft.settings.shuffleQuestions = Boolean($('[data-field="shuffleQuestions"]')?.checked);
+  draft.settings.shuffleOptions = Boolean($('[data-field="shuffleOptions"]')?.checked);
+  draft.settings.showAnswers = Boolean($('[data-field="showAnswers"]')?.checked);
+  draft.questions.forEach((question, qi) => {
+    const typeSelect = $(`[data-field="type"][data-qi="${qi}"]`);
+    if (typeSelect) question.type = typeSelect.value;
+    question.q = value(`[data-field="q"][data-qi="${qi}"]`);
+    question.points = Number(value(`[data-field="points"][data-qi="${qi}"]`)) || 1;
+    if (["choice", "multi", "order"].includes(question.type)) {
+      question.options = $$(`[data-field="opt"][data-qi="${qi}"]`).map((input) => input.value);
+      if (question.type === "choice") {
+        const checked = $(`[data-field="answer"][data-qi="${qi}"]:checked`);
+        question.answer = checked ? Number(checked.dataset.oi) : 0;
+      } else if (question.type === "multi") {
+        question.answer = $$(`[data-field="answer"][data-qi="${qi}"]:checked`).map((input) => Number(input.dataset.oi));
+      } else {
+        question.answer = question.options.map((_, index) => index);
+      }
+    }
+    if (question.type === "judge") {
+      question.answer = Number(value(`[data-field="judge"][data-qi="${qi}"]`)) === 1 ? 1 : 0;
+    }
+    if (question.type === "open") {
+      question.sample = value(`[data-field="sample"][data-qi="${qi}"]`);
+      question.keywords = value(`[data-field="keywords"][data-qi="${qi}"]`)
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    if (question.type === "match") {
+      question.left = $$(`[data-field="left"][data-qi="${qi}"]`).map((input) => input.value);
+      question.right = $$(`[data-field="right"][data-qi="${qi}"]`).map((input) => input.value);
+      question.answer = question.left.map((_, index) => index);
+    }
+  });
+}
+
+function compactDraft(draft) {
+  draft.questions.forEach((question) => {
+    question.q = String(question.q || "").trim();
+    question.points = Math.max(1, Math.min(20, Number(question.points) || 1));
+    if (["choice", "multi", "order"].includes(question.type)) {
+      const kept = [];
+      const map = new Map();
+      question.options.forEach((option, index) => {
+        const text = String(option || "").trim();
+        if (!text) return;
+        map.set(index, kept.length);
+        kept.push(text);
+      });
+      if (question.type === "choice") question.answer = map.get(Number(question.answer)) ?? 0;
+      if (question.type === "multi") {
+        question.answer = (Array.isArray(question.answer) ? question.answer : [])
+          .map((index) => map.get(Number(index)))
+          .filter((index) => index != null);
+      }
+      if (question.type === "order") question.answer = kept.map((_, index) => index);
+      question.options = kept;
+    }
+    if (question.type === "match") {
+      const pairs = question.left
+        .map((left, index) => ({ left: String(left || "").trim(), right: String(question.right?.[index] || "").trim() }))
+        .filter((pair) => pair.left && pair.right);
+      question.left = pairs.map((pair) => pair.left);
+      question.right = pairs.map((pair) => pair.right);
+      question.answer = question.left.map((_, index) => index);
+    }
+  });
+  draft.questions = draft.questions.filter((question) => question.q);
+}
+
+function validateDraft(draft) {
+  if (!draft.title.trim()) throw new Error("Укажите название теста");
+  if (!draft.questions.length) throw new Error("Добавьте хотя бы одно задание");
+  draft.questions.forEach((question, index) => {
+    if (!question.q) throw new Error(`Задание ${index + 1}: добавьте текст`);
+    if (["choice", "multi", "order"].includes(question.type) && question.options.length < 2) {
+      throw new Error(`Задание ${index + 1}: нужно минимум два варианта`);
+    }
+    if (question.type === "choice" && !Number.isInteger(Number(question.answer))) {
+      throw new Error(`Задание ${index + 1}: отметьте верный вариант`);
+    }
+    if (question.type === "multi" && (!question.answer.length || question.answer.length === question.options.length)) {
+      throw new Error(`Задание ${index + 1}: отметьте верные варианты, но не все`);
+    }
+    if (question.type === "match" && question.left.length < 2) {
+      throw new Error(`Задание ${index + 1}: нужно минимум две пары`);
+    }
+  });
+}
+
+function draftPayload(draft) {
+  return {
+    title: draft.title.trim(),
+    subject: draft.subject.trim(),
+    grade: draft.grade.trim(),
+    description: draft.description.trim(),
+    settings: {
+      attempts: Number(draft.settings.attempts) || 1,
+      deadline: draft.settings.deadline ? fromMoscowInput(draft.settings.deadline) : null,
+      shuffleQuestions: Boolean(draft.settings.shuffleQuestions),
+      shuffleOptions: Boolean(draft.settings.shuffleOptions),
+      showAnswers: Boolean(draft.settings.showAnswers),
+      timeLimitMin: Number(draft.settings.timeLimitMin) || 0,
+    },
+    questions: draft.questions.map((question) => {
+      const out = { type: question.type, q: question.q, points: question.points };
+      if (question.id) out.id = question.id;
+      if (["choice", "multi", "order"].includes(question.type)) {
+        out.options = question.options;
+        if (question.type === "choice") out.answer = Number(question.answer) || 0;
+        if (question.type === "multi") out.answer = question.answer;
+        if (question.type === "order") out.answer = question.options.map((_, index) => index);
+      }
+      if (question.type === "judge") out.answer = Number(question.answer) === 1 ? 1 : 0;
+      if (question.type === "open") {
+        out.sample = question.sample;
+        out.keywords = question.keywords;
+      }
+      if (question.type === "match") {
+        out.left = question.left;
+        out.right = question.right;
+        out.answer = question.left.map((_, index) => index);
+      }
+      return out;
+    }),
+  };
+}
+
+function loginCardHtml({ text = "" } = {}) {
+  return `<div class="card stack login-card">
+    <div class="section-head"><h2>Вход</h2><span>код доступа</span></div>
+    <p class="small muted">${
+      text ||
+      "В MAX аккаунт подтягивается автоматически. В браузере введите код учителя или администратора."
+    }</p>
+    <form id="loginForm" class="stack">
+      <label class="field"><span>Код</span><input class="input" name="code" autocomplete="one-time-code" placeholder="ABCD1234" required /></label>
+      <button class="btn btn-primary" type="submit">${ICON.lock} Войти</button>
+    </form>
+    <p class="small muted">Роль ученика появляется сама после входа через MAX. Учителя назначает администратор через базу или бота.</p>
+  </div>`;
+}
+
+function accountCardHtml() {
+  const user = state.user;
+  if (!user) return loginCardHtml();
+  const initial = String(user.name || "Я").trim().charAt(0).toUpperCase();
+  return `<div class="card account-card">
+    <div class="account-row">
+      <span class="avatar" aria-hidden="true">${esc(initial)}</span>
+      <div><b>${esc(user.name)}</b><small>${roleLabel(user.role)} · ${user.source === "max" ? "MAX" : "код"}</small></div>
+      <span class="pill">${roleLabel(user.role)}</span>
+    </div>
+    <div class="account-actions">
+      <button type="button" class="btn btn-ghost btn-sm" data-logout>Выйти</button>
+    </div>
+  </div>`;
+}
+
+function quotaBarHtml(ai) {
+  if (!state.user) return "";
+  if (ai.ownKey) {
+    return `<div class="card quota-card"><div class="quota-line"><b>Свой ключ</b><span>без дневного лимита</span></div><div class="quota-bar"><span style="width:100%"></span></div><small>Запросы идут через вашего провайдера.</small></div>`;
+  }
+  const quota = ai.quota;
+  if (!quota) return "";
+  const limit = Number(quota.limit) || 0;
+  const used = Number(quota.used) || 0;
+  const percent = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  return `<div class="card quota-card">
+    <div class="quota-line"><b>${quota.remaining ?? 0} из ${limit} запросов</b><span>${used} использовано</span></div>
+    <div class="quota-bar" role="progressbar" aria-valuemin="0" aria-valuemax="${limit}" aria-valuenow="${used}"><span style="width:${percent}%"></span></div>
+    <small>Сброс в 00:00 МСК. Свой ключ в настройках снимает лимит.</small>
+  </div>`;
+}
+
+function aiKeyFormHtml(ai) {
+  const own = Array.isArray(state.user?.ownKeys) ? state.user.ownKeys : [];
+  return `<form id="ai" class="card stack">
+    <div class="section-head"><h2>Свой ключ</h2><span>снимает лимит</span></div>
+    <p class="small muted">Если 5 запросов в день мало, добавьте свой ключ. Он хранится на сервере в зашифрованном виде и не возвращается в браузер.</p>
+    ${
+      own.length
+        ? `<div class="key-list">${own
+            .map(
+              (provider) => `<div class="key-row"><span class="pill">${esc(
+                providerName(provider)
+              )}</span><small>ключ сохранён</small><button type="button" class="btn btn-ghost btn-sm" data-ai-remove="${esc(
+                provider
+              )}">Удалить</button></div>`
+            )
+            .join("")}</div>`
+        : ""
+    }
+    <label class="field"><span>Провайдер</span><select class="select" name="provider">
+      <option value="gigachat" ${ai.provider !== "yandex" && ai.provider !== "openai" ? "selected" : ""}>GigaChat</option>
+      <option value="yandex" ${ai.provider === "yandex" ? "selected" : ""}>Алиса (YandexGPT)</option>
+      <option value="openai" ${ai.provider === "openai" ? "selected" : ""}>OpenAI</option>
+    </select></label>
+    <label class="field"><span>Ключ</span><input class="input" name="key" type="password" autocomplete="off" placeholder="Вставьте ключ" /><small>Ключ проверяется сразу после сохранения.</small></label>
+    <label class="field"><span>Каталог Yandex Cloud</span><input class="input" name="folder" value="${esc(
+      ai.folder || ""
+    )}" placeholder="Только для Алисы" autocomplete="off" /></label>
+    <button class="btn btn-primary" type="submit">${ICON.spark} Подключить ключ</button>
+    <p class="small muted" id="aiStatus" role="status" aria-live="polite">${esc(state.status)}</p>
+    <details class="fold"><summary>Где взять ключ</summary><div class="fold-body small muted">
+      <p><b>GigaChat:</b> developers.sber.ru → проект → ключ авторизации (Basic).</p>
+      <p><b>Алиса:</b> Yandex Cloud → сервисный аккаунт → API-ключ и идентификатор каталога.</p>
+      <p><b>OpenAI:</b> platform.openai.com → API keys.</p>
+    </div></details>
+  </form>`;
+}
+
+function statsCardHtml() {
+  const stats = state.stats;
+  if (!stats) {
+    return `<div class="card"><span class="kicker">Статистика</span><p class="small muted">Загружаю…</p></div>`;
+  }
+  const providers = Object.keys(stats.byProvider || {})
+    .map(providerName)
+    .join(", ");
+  return `<div class="card stack">
+    <div class="section-head"><h2>Статистика</h2><span>за сегодня</span></div>
+    <div class="summary-grid compact">
+      <div class="summary-stat"><b>${stats.today?.total || 0}</b><small>запросов ИИ</small></div>
+      <div class="summary-stat"><b>${stats.today?.ok || 0}</b><small>успешно</small></div>
+      <div class="summary-stat"><b>${stats.totals?.total || 0}</b><small>всего</small></div>
+      <div class="summary-stat"><b>${stats.tests?.count || 0}</b><small>тестов</small></div>
+    </div>
+    <p class="small muted">Провайдеры: ${esc(providers || "—")}. Отчёты по тестам и статистика также доступны в MAX-боте.</p>
+  </div>`;
+}
+
+function testCard(test) {
+  const share = shareUrl(test.shareToken);
+  const meta = [test.subject, test.grade ? `${test.grade} класс` : ""].filter(Boolean).join(" · ");
+  return `<article class="test-card card">
+    <div class="test-card-head">
+      <div><span class="kicker">${esc(meta || "Тест")}</span><h3>${esc(test.title)}</h3></div>
+      <span class="pill ${test.status === "open" ? "good" : "low"}">${test.status === "open" ? "Открыт" : "Закрыт"}</span>
+    </div>
+    <p class="small muted">${test.questionCount} ${plural(
+      test.questionCount,
+      "задание",
+      "задания",
+      "заданий"
+    )} · ${pointsText(test.totalPoints)} · попыток: ${test.attemptsCount || 0} · учеников: ${test.studentsCount || 0}</p>
+    <p class="small muted">Попыток на ученика: ${test.settings?.attempts || 1}${
+      test.settings?.deadline ? ` · до ${moscowWhen(test.settings.deadline, true)} МСК` : ""
+    }</p>
+    <div class="share-box">
+      <input class="input" readonly value="${esc(share)}" aria-label="Ссылка на тест" />
+      <button type="button" class="btn btn-ghost btn-sm" data-test-act="copy" data-token="${esc(
+        test.shareToken
+      )}">${ICON.copy} Копировать</button>
+    </div>
+    <div class="test-card-actions">
+      <a class="btn btn-soft btn-sm" href="#/test/${esc(test.id)}">${ICON.chart} Результаты</a>
+      <button type="button" class="btn btn-ghost btn-sm" data-test-act="edit" data-id="${esc(test.id)}">Изменить</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-test-act="report" data-id="${esc(
+        test.id
+      )}">Отчёт в MAX</button>
+      ${
+        test.status === "open"
+          ? `<button type="button" class="btn btn-ghost btn-sm" data-test-act="close" data-id="${esc(
+              test.id
+            )}">Закрыть</button>`
+          : ""
+      }
+      <button type="button" class="btn btn-danger btn-sm" data-test-act="delete" data-id="${esc(
+        test.id
+      )}">Удалить</button>
+    </div>
+  </article>`;
+}
+
+function myAttemptsHtml() {
+  if (!state.myAttempts.length) {
+    return emptyHtml(
+      "Попыток пока нет",
+      "Откройте ссылку учителя — тест появится здесь после сдачи.",
+      ICON.clipboard
+    );
+  }
+  return `<div class="attempt-list">${state.myAttempts
+    .map(
+      (attempt) => `<article class="attempt-row card">
+        <div class="attempt-main"><b>${esc(attempt.testTitle)}</b><small>${esc(attempt.ownerName)} · ${moscowWhen(
+        attempt.submittedAt,
+        true
+      )} МСК</small></div>
+        <div class="attempt-score"><b>${attempt.score}/${attempt.maxScore}</b><small>${attempt.percent}% · ${formatDuration(
+        attempt.durationSec
+      )}</small></div>
+        ${
+          attempt.shareToken
+            ? `<a class="btn btn-ghost btn-sm" href="#/t/${esc(attempt.shareToken)}">Открыть</a>`
+            : ""
+        }
+      </article>`
+    )
+    .join("")}</div>`;
+}
+
+function testInfoCardHtml() {
+  return `<div class="card inset">
+    <span class="kicker">Как это работает</span>
+    <ol class="how">
+      <li><b>Ссылка</b>Учитель отправляет ссылку на тест — регистрация не нужна.</li>
+      <li><b>Попытки</b>Вопросы идут вразнобой, попыток столько, сколько задал учитель.</li>
+      <li><b>Результат</b>Баллы сохраняются сразу и попадают учителю в MAX.</li>
+    </ol>
+  </div>`;
+}
+
+function testRulesCard(settings = {}) {
+  return `<div class="card inset">
+    <span class="kicker">Правила</span>
+    <ol class="how">
+      <li><b>Порядок</b>${settings.shuffleQuestions === false ? "Вопросы идут по порядку." : "Вопросы перемешиваются в каждой попытке."}</li>
+      <li><b>Варианты</b>${settings.shuffleOptions === false ? "Варианты идут по порядку." : "Варианты ответов тоже перемешиваются."}</li>
+      <li><b>Попытки</b>${settings.attempts || 1} на ученика${settings.deadline ? `, дедлайн ${moscowWhen(settings.deadline, true)} МСК` : ""}.</li>
+    </ol>
+  </div>`;
+}
+
+function testsHtml() {
+  if (state.testDraft) return testEditorHtml();
+  const teacher = isTeacher();
+  const head = `<header class="page-head">
+    <span class="kicker">Тесты</span>
+    <h1 class="display">${teacher ? "Мои тесты" : "Тесты и попытки"}</h1>
+    <p class="lede">${
+      teacher
+        ? "Создайте тест из своих вопросов, отправьте ссылку ученикам и смотрите результаты здесь и в MAX."
+        : "Пройдите тест по ссылке учителя. Результат сохранится автоматически."
+    }</p>
+  </header>`;
+  if (!state.authChecked) return head + `<div class="card"><p class="small muted">Проверяю доступ…</p></div>`;
+  if (!state.user) {
+    return (
+      head +
+      `<div class="home-grid"><div class="stack">${loginCardHtml({
+        text: "Откройте приложение в MAX — аккаунт подтянется сам. В браузере введите код учителя.",
+      })}</div><aside class="stack">${testInfoCardHtml()}</aside></div>`
+    );
+  }
+  if (state.testsLoading) return head + `<div class="card"><p class="small muted">Загружаю тесты…</p></div>`;
+  if (teacher) {
+    return (
+      head +
+      `<div class="stack">
+        <div class="tests-toolbar">
+          <button type="button" class="btn btn-primary" data-test-new>${ICON.plus} Новый тест</button>
+          <a class="btn btn-ghost" href="#/ai">${ICON.user} Аккаунт</a>
+        </div>
+        ${
+          state.tests.length
+            ? `<div class="test-list">${state.tests.map(testCard).join("")}</div>`
+            : emptyHtml(
+                "Пока нет тестов",
+                "Создайте первый тест из своих вопросов — ссылку можно отправить ученикам.",
+                ICON.clipboard,
+                `<button type="button" class="btn btn-primary" data-test-new>${ICON.plus} Создать тест</button>`
+              )
+        }
+      </div>`
+    );
+  }
+  return (
+    head +
+    `<div class="stack">
+      ${accountCardHtml()}
+      <div class="section-head"><h2>Мои попытки</h2><span>${state.myAttempts.length}</span></div>
+      ${myAttemptsHtml()}
+    </div>`
+  );
+}
+
+function testIntroHtml(test) {
+  const closed = test.status === "closed";
+  const settings = test.settings || {};
+  const meta = [test.subject, test.grade ? `${test.grade} класс` : ""].filter(Boolean).join(" · ");
+  return `<header class="page-head">
+    <span class="kicker">${esc(meta || "Тест учителя")}</span>
+    <h1 class="display">${esc(test.title)}</h1>
+    <p class="lede">${esc(test.description || "Тест по материалам учителя.")}</p>
+  </header>
+  <div class="home-grid">
+    <div class="stack">
+      <div class="card stack">
+        <div class="meta-chips">
+          <span class="pill">${test.questionCount} ${plural(
+            test.questionCount,
+            "задание",
+            "задания",
+            "заданий"
+          )}</span>
+          <span class="pill">${pointsText(test.totalPoints)}</span>
+          <span class="pill">Попыток: ${settings.attempts || 1}</span>
+          ${settings.deadline ? `<span class="pill">До ${moscowWhen(settings.deadline, true)} МСК</span>` : ""}
+          ${settings.timeLimitMin ? `<span class="pill">${settings.timeLimitMin} мин</span>` : ""}
+          <span class="pill ${closed ? "low" : "good"}">${closed ? "Закрыт" : "Открыт"}</span>
+        </div>
+        <p class="small muted">Автор: ${esc(test.ownerName || "Учитель")}</p>
+        ${
+          !state.user
+            ? noticeHtml("Войдите через MAX, чтобы пройти тест. Аккаунт подтягивается автоматически, регистрация не нужна.", "warn")
+            : ""
+        }
+        ${closed ? noticeHtml("Срок прохождения истёк или учитель закрыл тест.", "warn") : ""}
+        ${
+          state.user && !closed
+            ? `<button type="button" class="btn btn-primary" data-attempt-start>${ICON.clipboard} Начать тест</button>`
+            : ""
+        }
+      </div>
+      ${
+        !state.user
+          ? loginCardHtml({ text: "В MAX вход произойдёт сам. В браузере введите код учителя или ученика." })
+          : ""
+      }
+    </div>
+    <aside class="stack">${testRulesCard(settings)}</aside>
+  </div>`;
+}
+
+function attemptQuestionHtml(question, index) {
+  const points = `${Number(question.points) || 1} ${plural(Number(question.points) || 1, "балл", "балла", "баллов")}`;
+  let body = "";
+  if (question.type === "choice" || question.type === "judge") {
+    const options = question.type === "judge" ? ["Верно", "Неверно"] : question.options || [];
+    body = `<div class="answers">${options
+      .map(
+        (option, oi) => `<label class="answer"><input type="radio" name="a-${esc(question.id)}" value="${oi}" /><span><b>${letterAt(
+          oi
+        )}</b> ${esc(option)}</span></label>`
+      )
+      .join("")}</div>`;
+  } else if (question.type === "multi") {
+    body = `<div class="answers">${(question.options || [])
+      .map(
+        (option, oi) => `<label class="answer"><input type="checkbox" name="a-${esc(question.id)}" value="${oi}" /><span><b>${letterAt(
+          oi
+        )}</b> ${esc(option)}</span></label>`
+      )
+      .join("")}</div>`;
+  } else if (question.type === "open") {
+    body = `<label class="field"><span>Ответ</span><textarea class="textarea" rows="4" data-open="${esc(
+      question.id
+    )}" placeholder="Напишите ответ"></textarea></label>`;
+  } else if (question.type === "order") {
+    body = `<ol class="order-list" data-order="${esc(question.id)}">${(question.options || [])
+      .map(
+        (option, oi) => `<li data-oi="${oi}"><span>${esc(option)}</span><span class="order-btns"><button type="button" class="icon-btn" data-order-move="up" aria-label="Выше">↑</button><button type="button" class="icon-btn" data-order-move="down" aria-label="Ниже">↓</button></span></li>`
+      )
+      .join("")}</ol><small class="small muted">Расставьте пункты в правильном порядке.</small>`;
+  } else if (question.type === "match") {
+    body = `<div class="match-list">${(question.left || [])
+      .map(
+        (left, li) => `<label class="match-item"><span>${esc(left)}</span><select class="select" data-match="${esc(
+          question.id
+        )}"><option value="">— выберите —</option>${(question.right || [])
+          .map((right, ri) => `<option value="${ri}">${esc(right)}</option>`)
+          .join("")}</select></label>`
+      )
+      .join("")}</div>`;
+  }
+  return `<article class="card attempt-q">
+    <div class="q-head"><span class="q-no">${index + 1}</span><span class="pill">${points}</span></div>
+    <p class="q-text">${esc(question.q)}</p>
+    ${body}
+  </article>`;
+}
+
+function attemptFormHtml(test) {
+  const attempt = state.attempt;
+  return `<header class="page-head">
+    <span class="kicker">Попытка ${attempt.attemptNo} из ${attempt.attemptsLimit}</span>
+    <h1 class="display">${esc(test.title)}</h1>
+    <p class="lede">Ответьте на вопросы и отправьте работу. Проверка автоматическая.</p>
+  </header>
+  <form id="attemptForm" class="stack">
+    <div class="test-timer" id="testTimer" data-deadline="${esc(attempt.deadline || "")}">${
+      attempt.deadline ? "До конца: …" : "Без дедлайна"
+    }</div>
+    ${attempt.questions.map(attemptQuestionHtml).join("")}
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">${ICON.check} Завершить тест</button>
+      <span class="small muted">После отправки изменить ответы нельзя</span>
+    </div>
+  </form>`;
+}
+
+function detailHtml(detail) {
+  return `<article class="card attempt-q ${detail.correct ? "is-correct" : "is-wrong"}">
+    <div class="q-head"><span class="q-no">${detail.correct ? "✓" : "×"}</span><span class="pill ${
+      detail.correct ? "good" : "low"
+    }">${detail.got}/${detail.points}</span></div>
+    <p class="q-text">${esc(detail.q)}</p>
+    <p class="small"><b>Ваш ответ:</b> ${esc(detail.userAnswer || "—")}</p>
+    ${!detail.correct ? `<p class="small muted"><b>Верно:</b> ${esc(detail.correctAnswer || "—")}</p>` : ""}
+  </article>`;
+}
+
+function attemptResultHtml(test) {
+  const result = state.attemptResult;
+  const details = Array.isArray(result.details) ? result.details : [];
+  const tone = result.percent >= 80 ? "good" : result.percent >= 50 ? "mid" : "low";
+  return `<header class="page-head">
+    <span class="kicker">Результат</span>
+    <h1 class="display">${esc(test.title)}</h1>
+  </header>
+  <div class="home-grid">
+    <div class="stack">
+      <div class="card result-card">
+        <div class="result-score"><b>${result.score}</b><span>из ${result.maxScore}</span></div>
+        <div class="result-meta">
+          <span class="pill ${tone}">${result.percent}%</span>
+          <span class="pill">${formatDuration(result.durationSec)}</span>
+          <span class="pill">Попытка ${result.attemptNo} из ${result.attemptsLimit}</span>
+        </div>
+        <p class="small muted">${
+          result.attemptsLeft > 0 ? `Осталось попыток: ${result.attemptsLeft}.` : "Это была последняя попытка."
+        }</p>
+        <div class="form-actions">
+          ${
+            result.attemptsLeft > 0 && test.status !== "closed"
+              ? `<button type="button" class="btn btn-primary" data-attempt-again>${ICON.spark} Пройти ещё раз</button>`
+              : ""
+          }
+          <a class="btn btn-ghost" href="#/tests">К тестам</a>
+        </div>
+      </div>
+      ${
+        details.length
+          ? `<div class="section-head"><h2>Разбор</h2><span>${details.filter((item) => item.correct).length} из ${
+              details.length
+            }</span></div><div class="stack">${details.map(detailHtml).join("")}</div>`
+          : ""
+      }
+    </div>
+    <aside class="stack">${testRulesCard(test.settings || {})}</aside>
+  </div>`;
+}
+
+function testTakeHtml() {
+  const head = `<header class="page-head"><span class="kicker">Тест</span><h1 class="display">${
+    state.publicTest ? esc(state.publicTest.title) : "Проверка"
+  }</h1></header>`;
+  if (state.publicTestLoading && !state.publicTest) {
+    return head + `<div class="card"><p class="small muted">Открываю тест…</p></div>`;
+  }
+  if (state.publicTestError) {
+    return (
+      head +
+      emptyHtml("Тест не открылся", state.publicTestError, ICON.alert) +
+      `<a class="btn btn-ghost" href="#/tests">К тестам</a>`
+    );
+  }
+  const test = state.publicTest;
+  if (!test) return head;
+  if (state.attemptResult) return attemptResultHtml(test);
+  if (state.attempt) return attemptFormHtml(test);
+  return testIntroHtml(test);
+}
+
+function resultsTableHtml(data) {
+  const test = data.test || {};
+  const students = Array.isArray(data.students) ? data.students : [];
+  if (!students.length) {
+    return emptyHtml(
+      "Пока никто не проходил",
+      "Отправьте ученикам ссылку на тест — результаты появятся здесь.",
+      ICON.clipboard
+    );
+  }
+  return `<div class="table-wrap"><table class="mat">
+    <caption>${students.length} ${plural(students.length, "ученик", "ученика", "учеников")} · ${
+      data.summary?.submitted || 0
+    } сдали</caption>
+    <thead><tr><th>Ученик</th><th>Попытки</th><th>Лучший</th><th>Последний</th><th>Время</th><th>Сдал</th></tr></thead>
+    <tbody>${students
+      .map(
+        (student) => `<tr>
+        <td><b>${esc(student.name)}</b>${student.maxId ? `<small>MAX ${esc(student.maxId)}</small>` : ""}
+          <details class="mini-attempts"><summary>по попыткам</summary><ol>${(student.attemptsList || [])
+            .map(
+              (attempt) =>
+                `<li>№${attempt.attemptNo} — ${
+                  attempt.status === "submitted"
+                    ? `${attempt.score}/${attempt.maxScore} (${attempt.percent}%)`
+                    : "не завершена"
+                } · ${formatDuration(attempt.durationSec)}</li>`
+            )
+            .join("")}</ol></details>
+        </td>
+        <td>${student.attemptsCount || 0}</td>
+        <td>${student.bestPercent || 0}%</td>
+        <td>${student.lastScore == null ? "—" : `${student.lastScore}/${test.totalPoints || 0} (${student.lastPercent || 0}%)`}</td>
+        <td>${formatDuration(student.totalDurationSec)}</td>
+        <td>${student.lastSubmittedAt ? moscowWhen(student.lastSubmittedAt, true) : "—"}</td>
+      </tr>`
+      )
+      .join("")}</tbody>
+  </table></div>`;
+}
+
+function testResultsHtml() {
+  const head = `<header class="page-head">
+    <button type="button" class="link-back" data-result-act="back">${ICON.left} К тестам</button>
+    <span class="kicker">Результаты</span>
+    <h1 class="display">${state.testResults?.test?.title ? esc(state.testResults.test.title) : "Результаты теста"}</h1>
+  </header>`;
+  if (!state.user) {
+    return (
+      head +
+      loginCardHtml({
+        text: "Результаты доступны учителю. Войдите через MAX или введите код учителя.",
+      })
+    );
+  }
+  if (state.testResultsLoading && !state.testResults) {
+    return head + `<div class="card"><p class="small muted">Загружаю результаты…</p></div>`;
+  }
+  if (state.testResultsError) {
+    return head + emptyHtml("Не удалось открыть результаты", state.testResultsError, ICON.alert);
+  }
+  const data = state.testResults;
+  if (!data) return head;
+  const test = data.test || {};
+  const summary = data.summary || {};
+  const share = test.shareToken ? shareUrl(test.shareToken) : "";
+  return `${head}
+  <div class="summary-grid">
+    <div class="summary-stat"><b>${summary.students || 0}</b><small>учеников</small></div>
+    <div class="summary-stat"><b>${summary.submitted || 0}</b><small>сдали</small></div>
+    <div class="summary-stat"><b>${summary.averagePercent || 0}%</b><small>средний лучший</small></div>
+    <div class="summary-stat"><b>${summary.bestPercent || 0}%</b><small>лучший результат</small></div>
+  </div>
+  <div class="result-actions">
+    ${share ? `<button type="button" class="btn btn-ghost btn-sm" data-result-act="copy" data-token="${esc(test.shareToken)}">${ICON.copy} Ссылка</button>` : ""}
+    <button type="button" class="btn btn-ghost btn-sm" data-result-act="report" data-id="${esc(test.id)}">${ICON.chart} Отчёт в MAX</button>
+    ${
+      test.status === "open"
+        ? `<button type="button" class="btn btn-ghost btn-sm" data-result-act="close" data-id="${esc(test.id)}">${ICON.lock} Закрыть</button>`
+        : ""
+    }
+    <button type="button" class="btn btn-ghost btn-sm" data-result-act="edit" data-id="${esc(test.id)}">Изменить</button>
+    <button type="button" class="btn btn-danger btn-sm" data-result-act="delete" data-id="${esc(test.id)}">Удалить</button>
+  </div>
+  ${share ? `<div class="share-box"><input class="input" readonly value="${esc(share)}" aria-label="Ссылка на тест" /><button type="button" class="btn btn-ghost btn-sm" data-result-act="copy" data-token="${esc(test.shareToken)}">${ICON.copy}</button></div>` : ""}
+  <p class="small muted">${
+    test.settings?.deadline
+      ? `Дедлайн ${moscowWhen(test.settings.deadline, true)} МСК. После него отчёт автоматически уходит в MAX.`
+      : "Отчёт можно отправить в MAX вручную."
+  }</p>
+  ${resultsTableHtml(data)}`;
+}
+
+/* ───────────── загрузка тестов и доступ ───────────── */
+
+async function loadTests() {
+  if (!state.user) return;
+  state.testsLoading = true;
+  render();
+  try {
+    const data = await api("/api/tests");
+    state.tests = Array.isArray(data.tests) ? data.tests : [];
+    state.myAttempts = Array.isArray(data.attempts) ? data.attempts : [];
+  } catch (error) {
+    toast(error?.message || "Не удалось загрузить тесты", "error");
+  } finally {
+    state.testsLoading = false;
+    render();
+  }
+}
+
+async function loadPublicTest(token) {
+  if (!token) return;
+  state.publicTestLoading = true;
+  state.publicTestError = "";
+  render();
+  try {
+    const data = await api(`/api/t/${encodeURIComponent(token)}`);
+    state.publicTest = { ...data, shareToken: token };
+    state.attempt = null;
+    state.attemptResult = null;
+  } catch (error) {
+    state.publicTest = null;
+    state.publicTestError = error?.message || "Ссылка не найдена";
+  } finally {
+    state.publicTestLoading = false;
+    render();
+  }
+}
+
+async function loadTestResults(id) {
+  if (!id || !state.user) return;
+  state.testResultsLoading = true;
+  state.testResultsError = "";
+  render();
+  try {
+    state.testResults = await api(`/api/tests/${encodeURIComponent(id)}/results`);
+  } catch (error) {
+    state.testResults = null;
+    state.testResultsError = error?.message || "Не удалось открыть результаты";
+  } finally {
+    state.testResultsLoading = false;
+    render();
+  }
+}
+
+async function loadStats() {
+  if (!isTeacher() || state.stats) return;
+  try {
+    state.stats = await api("/api/stats");
+    render();
+  } catch {
+    /* статистика не критична */
+  }
+}
+
+async function startAttempt() {
+  const test = state.publicTest;
+  if (!test || state.busy) return;
+  if (!state.user) {
+    toast("Войдите через MAX, чтобы пройти тест", "error");
+    return;
+  }
+  const button = $("[data-attempt-start]");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> Открываю…`;
+  }
+  try {
+    state.attempt = await api(`/api/t/${encodeURIComponent(test.shareToken)}/start`, { method: "POST" });
+    state.attemptResult = null;
+    haptic("light");
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (error) {
+    toast(error?.message || "Не удалось начать тест", "error");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = `${ICON.clipboard} Начать тест`;
+    }
+  }
+}
+
+function collectAttemptAnswers() {
+  const attempt = state.attempt;
+  const answers = {};
+  if (!attempt) return answers;
+  const form = $("#attemptForm");
+  for (const question of attempt.questions || []) {
+    if (question.type === "choice" || question.type === "judge") {
+      const checked = form?.querySelector(`input[name="a-${question.id}"]:checked`);
+      answers[question.id] = checked ? Number(checked.value) : null;
+    } else if (question.type === "multi") {
+      answers[question.id] = $$(`input[name="a-${question.id}"]:checked`, form).map((input) => Number(input.value));
+    } else if (question.type === "open") {
+      answers[question.id] = form?.querySelector(`[data-open="${question.id}"]`)?.value || "";
+    } else if (question.type === "order") {
+      const list = form?.querySelector(`[data-order="${question.id}"]`);
+      answers[question.id] = list ? $$("li", list).map((item) => Number(item.dataset.oi)) : [];
+    } else if (question.type === "match") {
+      answers[question.id] = $$(`[data-match="${question.id}"]`, form).map((select) =>
+        select.value === "" ? null : Number(select.value)
+      );
+    }
+  }
+  return answers;
+}
+
+async function submitAttempt() {
+  const attempt = state.attempt;
+  if (!attempt || state.busy) return;
+  const button = $("#attemptForm button[type='submit']");
+  state.busy = true;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> Проверяю…`;
+  }
+  try {
+    state.attemptResult = await api(`/api/attempts/${encodeURIComponent(attempt.id)}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ answers: collectAttemptAnswers() }),
+    });
+    state.attempt = null;
+    state.busy = false;
+    haptic("success");
+    toast("Тест сдан");
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (error) {
+    state.busy = false;
+    toast(error?.message || "Не удалось отправить тест", "error");
+    haptic("error");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = `${ICON.check} Завершить тест`;
+    }
+  }
+}
+
+function startAttemptTimer() {
+  clearInterval(attemptTimer);
+  const element = $("#testTimer");
+  if (!element) return;
+  const deadline = element.dataset.deadline;
+  const tick = () => {
+    if (!deadline) {
+      element.textContent = "Без дедлайна";
+      return;
+    }
+    const left = Date.parse(deadline) - Date.now();
+    if (left <= 0) {
+      element.textContent = "Время истекло";
+      element.classList.add("low");
+      return;
+    }
+    const minutes = Math.floor(left / 60000);
+    const seconds = Math.floor((left % 60000) / 1000);
+    element.textContent = `До конца: ${minutes}:${String(seconds).padStart(2, "0")}`;
+  };
+  tick();
+  attemptTimer = setInterval(tick, 1000);
+}
+
+async function saveDraft() {
+  if (!state.testDraft || state.editorBusy) return;
+  readDraftForm();
+  const draft = state.testDraft;
+  try {
+    compactDraft(draft);
+    validateDraft(draft);
+    const payload = draftPayload(draft);
+    state.editorBusy = true;
+    const editing = Boolean(draft.id);
+    const data = await api(editing ? `/api/tests/${encodeURIComponent(draft.id)}` : "/api/tests", {
+      method: editing ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    });
+    state.testDraft = null;
+    state.editorBusy = false;
+    toast(editing ? "Тест сохранён" : "Тест создан");
+    haptic("success");
+    if (editing) {
+      state.tests = state.tests.map((test) => (test.id === data.id ? data : test));
+    } else {
+      state.tests = [data, ...state.tests];
+    }
+    render();
+  } catch (error) {
+    state.editorBusy = false;
+    toast(error?.message || "Не удалось сохранить тест", "error");
+    haptic("error");
+  }
+}
+
+function bindTests() {
+  $$("[data-test-new]").forEach((button) =>
+    button.addEventListener("click", () => {
+      state.testDraft = newTestDraft();
+      state.status = "";
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    })
+  );
+  $$("[data-test-act]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.testAct;
+      const id = button.dataset.id;
+      const token = button.dataset.token;
+      if (action === "copy" && token) return copyText(shareUrl(token));
+      if (action === "edit" && id) {
+        const test = state.tests.find((item) => item.id === id);
+        if (!test) return;
+        state.testDraft = draftFromTest(test);
+        render();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      if (action === "delete" && id) return removeTest(id);
+      if (action === "close" && id) return closeTest(id);
+      if (action === "report" && id) return reportTest(id);
+    });
+  });
+  $$("[data-editor-cancel]").forEach((button) =>
+    button.addEventListener("click", () => {
+      state.testDraft = null;
+      render();
+    })
+  );
+  $("#testEditor")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveDraft();
+  });
+  $("#testEditor")?.addEventListener("change", (event) => {
+    const type = event.target.closest('[data-field="type"]');
+    if (!type) return;
+    readDraftForm();
+    const question = state.testDraft?.questions?.[Number(type.dataset.qi)];
+    if (!question) return;
+    ensureQuestionShape(question);
+    render();
+  });
+  $$("[data-qact]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.qact;
+      const qi = Number(button.dataset.qi);
+      const oi = Number(button.dataset.oi);
+      if (!state.testDraft) return;
+      readDraftForm();
+      const questions = state.testDraft.questions;
+      const question = Number.isInteger(qi) ? questions[qi] : null;
+      if (action === "add") {
+        questions.push(blankQuestion("choice"));
+        render();
+        return;
+      }
+      if (!question) return;
+      if (action === "remove") {
+        if (questions.length <= 1) {
+          toast("Нужно хотя бы одно задание", "error");
+          return;
+        }
+        questions.splice(qi, 1);
+      } else if (action === "up" && qi > 0) {
+        [questions[qi - 1], questions[qi]] = [questions[qi], questions[qi - 1]];
+      } else if (action === "down" && qi < questions.length - 1) {
+        [questions[qi + 1], questions[qi]] = [questions[qi], questions[qi + 1]];
+      } else if (action === "add-opt") {
+        question.options.push("");
+      } else if (action === "del-opt") {
+        if (question.options.length <= 2) {
+          toast("Нужно минимум два варианта", "error");
+          return;
+        }
+        question.options.splice(oi, 1);
+        if (Number(question.answer) === oi) question.answer = 0;
+        else if (Number(question.answer) > oi) question.answer = Number(question.answer) - 1;
+        if (Array.isArray(question.answer)) {
+          question.answer = question.answer
+            .filter((index) => index !== oi)
+            .map((index) => (index > oi ? index - 1 : index));
+        }
+      } else if (action === "add-pair") {
+        question.left.push("");
+        question.right.push("");
+      } else if (action === "del-pair") {
+        if (question.left.length <= 2) {
+          toast("Нужно минимум две пары", "error");
+          return;
+        }
+        question.left.splice(oi, 1);
+        question.right.splice(oi, 1);
+      } else {
+        return;
+      }
+      ensureQuestionShape(question);
+      render();
+    });
+  });
+}
+
+function bindTestTake() {
+  $("[data-attempt-start]")?.addEventListener("click", startAttempt);
+  $("[data-attempt-again]")?.addEventListener("click", () => {
+    state.attemptResult = null;
+    startAttempt();
+  });
+  $("#attemptForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const answers = collectAttemptAnswers();
+    const attempt = state.attempt;
+    if (!attempt) return;
+    const answered = Object.values(answers).filter((value) =>
+      Array.isArray(value) ? value.length : value !== null && value !== ""
+    ).length;
+    const left = attempt.questions.length - answered;
+    openConfirm({
+      title: "Завершить тест?",
+      message:
+        left > 0
+          ? `Без ответа: ${left} ${plural(left, "задание", "задания", "заданий")}. После отправки изменить ответы нельзя.`
+          : "Все задания отвечены. После отправки изменить ответы нельзя.",
+      confirmLabel: "Завершить",
+      onConfirm: submitAttempt,
+    });
+  });
+  $$("[data-order-move]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = button.closest("li");
+      const list = item?.parentElement;
+      if (!item || !list) return;
+      if (button.dataset.orderMove === "up" && item.previousElementSibling) {
+        list.insertBefore(item, item.previousElementSibling);
+      } else if (button.dataset.orderMove === "down" && item.nextElementSibling) {
+        list.insertBefore(item.nextElementSibling, item);
+      }
+      haptic("light");
+    });
+  });
+  if (state.attempt) startAttemptTimer();
+}
+
+function bindTestResults() {
+  $$("[data-result-act]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.resultAct;
+      const id = button.dataset.id || state.testResults?.test?.id;
+      const token = button.dataset.token || state.testResults?.test?.shareToken;
+      if (action === "back") return navigate("tests");
+      if (action === "copy" && token) return copyText(shareUrl(token));
+      if (action === "report" && id) return reportTest(id);
+      if (action === "close" && id) return closeTest(id, true);
+      if (action === "edit" && id) {
+        const test = state.testResults?.test;
+        if (!test) return;
+        state.testDraft = draftFromTest(test);
+        navigate("tests");
+        render();
+        return;
+      }
+      if (action === "delete" && id) return removeTest(id, true);
+    });
+  });
+}
+
+async function removeTest(id, fromResults = false) {
+  const test = state.tests.find((item) => item.id === id) || state.testResults?.test;
+  openConfirm({
+    title: "Удалить тест?",
+    message: `«${test?.title || "Тест"}» и все попытки учеников исчезнут. Это действие нельзя отменить.`,
+    confirmLabel: "Удалить",
+    onConfirm: async () => {
+      await api(`/api/tests/${encodeURIComponent(id)}`, { method: "DELETE" });
+      state.tests = state.tests.filter((item) => item.id !== id);
+      if (state.testResults?.test?.id === id) state.testResults = null;
+      toast("Тест удалён");
+      haptic("success");
+      if (fromResults) navigate("tests");
+      else render();
+    },
+  });
+}
+
+async function closeTest(id, fromResults = false) {
+  try {
+    const data = await api(`/api/tests/${encodeURIComponent(id)}/close`, { method: "POST" });
+    state.tests = state.tests.map((test) => (test.id === id ? { ...test, ...data } : test));
+    if (state.testResults?.test?.id === id) {
+      state.testResults = { ...state.testResults, test: { ...state.testResults.test, ...data } };
+    }
+    toast("Тест закрыт");
+    haptic("success");
+    if (fromResults) render();
+    else render();
+  } catch (error) {
+    toast(error?.message || "Не удалось закрыть тест", "error");
+  }
+}
+
+async function reportTest(id) {
+  try {
+    const data = await api(`/api/tests/${encodeURIComponent(id)}/report`, { method: "POST" });
+    if (data.sent?.ok) {
+      toast("Отчёт отправлен в MAX");
+      haptic("success");
+    } else {
+      toast(data.sent?.error || "Отчёт готов, но MAX-бот не настроен", "error");
+    }
+  } catch (error) {
+    toast(error?.message || "Не удалось отправить отчёт", "error");
+  }
 }
 
 /* ───────────── действия ───────────── */
@@ -1931,9 +3606,8 @@ async function generate(skipCache) {
   bridge?.MainButton?.showProgress?.();
 
   try {
-    const response = await fetch("/api/generate", {
+    const data = await api("/api/generate", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: state.query,
         type: state.type,
@@ -1943,8 +3617,6 @@ async function generate(skipCache) {
         skipCache: Boolean(skipCache ?? state.skipCache),
       }),
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Ошибка ${response.status}`);
     state.pack = data;
     state.tab = data.materials?.[state.type] ? state.type : Object.keys(data.materials || {})[0] || "sources";
     state.slide = 0;
@@ -1979,13 +3651,10 @@ async function editPack(instruction) {
     button.innerHTML = `<span class="spinner"></span> Правлю…`;
   }
   try {
-    const response = await fetch("/api/edit", {
+    const data = await api("/api/edit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pack: state.pack, instruction }),
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Не удалось поправить");
     state.pack = data;
     state.status = "Правка добавлена в схему и презентацию.";
     saveLastPack(data);
@@ -2005,6 +3674,10 @@ async function editPack(instruction) {
 }
 
 function requestDelete(id) {
+  if (!isTeacher()) {
+    toast("Удалять учебники может учитель", "error");
+    return;
+  }
   const book = state.books.find((item) => item.id === id);
   if (!book) return;
   openConfirm({
@@ -2012,9 +3685,7 @@ function requestDelete(id) {
     message: `«${book.title || "Без названия"}» исчезнет из библиотеки и поиска. Это действие нельзя отменить.`,
     confirmLabel: "Удалить",
     onConfirm: async () => {
-      const response = await fetch(`/api/books/${encodeURIComponent(id)}`, { method: "DELETE" });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Не удалось удалить учебник");
+      await api(`/api/books/${encodeURIComponent(id)}`, { method: "DELETE" });
       state.bookIds = state.bookIds.filter((bookId) => bookId !== id);
       await loadState();
       state.status = "";
@@ -2045,9 +3716,7 @@ async function uploadBook(event) {
   if (status) status.textContent = "Индексация… Это может занять минуту.";
 
   try {
-    const response = await fetch("/api/books", { method: "POST", body: new FormData(form) });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.error) throw new Error(data.error || "Не удалось загрузить учебник");
+    const data = await api("/api/books", { method: "POST", body: new FormData(form) });
     await loadState();
     state.status = `Готово: ${data.indexed ?? 0} ${plural(data.indexed, "фрагмент", "фрагмента", "фрагментов")}.`;
     state.busy = false;
@@ -2077,13 +3746,10 @@ async function saveBrand(event) {
   };
   if (button) button.disabled = true;
   try {
-    const response = await fetch("/api/brand", {
+    const data = await api("/api/brand", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Не удалось сохранить оформление");
     state.brand = { ...state.brand, ...data };
     applyBrandFont();
     toast("Оформление сохранено");
@@ -2099,7 +3765,7 @@ async function saveAi(event) {
   event.preventDefault();
   if (state.busy) return;
   const form = event.target;
-  const provider = form.provider.value === "yandex" ? "yandex" : "gigachat";
+  const provider = ["yandex", "openai"].includes(form.provider.value) ? form.provider.value : "gigachat";
   const key = form.key.value.trim();
   const folder = form.folder.value.trim();
   const button = form.querySelector('button[type="submit"]');
@@ -2118,35 +3784,71 @@ async function saveAi(event) {
   if (status) status.textContent = "Проверяю ключ…";
 
   try {
-    const response = await fetch("/api/ai", {
+    await api("/api/ai", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider, key, folder }),
     });
-    const data = await response.json().catch(() => ({}));
-    const name = data.name || (provider === "yandex" ? "Алиса" : "GigaChat");
-    state.ai = {
-      ready: Boolean(data.ok && data.ready),
-      name,
-      provider,
-      folder: folder || data.folder || "",
-    };
-    state.status = data.ok
-      ? `${name} подключена. Тесты собирает модель по страницам учебника.`
-      : data.error || "Не удалось подключить";
+    await refreshAuth();
+    state.status = `Ключ подключён: ${providerName(provider)}. Дневной лимит снят.`;
     state.busy = false;
     state.busyKind = "";
     updateAiPill();
-    toast(state.status, data.ok ? "ok" : "error");
-    haptic(data.ok ? "success" : "error");
+    toast(state.status);
+    haptic("success");
     render();
   } catch (error) {
-    state.status = error?.message || "Не удалось подключить";
+    state.status = error?.message || "Не удалось подключить ключ";
     state.busy = false;
     state.busyKind = "";
     toast(state.status, "error");
     haptic("error");
     render();
+  }
+}
+
+async function removeAiKey(provider) {
+  if (!provider) return;
+  try {
+    await api(`/api/ai?provider=${encodeURIComponent(provider)}`, { method: "DELETE" });
+    await refreshAuth();
+    state.status = "Ключ удалён, снова действует общий пул.";
+    toast("Ключ удалён");
+    haptic("success");
+    render();
+  } catch (error) {
+    toast(error?.message || "Не удалось удалить ключ", "error");
+  }
+}
+
+async function loginWithCode(event) {
+  event.preventDefault();
+  const form = event.target;
+  const code = String(form.code.value || "").trim();
+  if (!code) return;
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span> Проверяю…`;
+  }
+  try {
+    const data = await api("/api/auth/code", { method: "POST", body: JSON.stringify({ code }) });
+    state.user = data.user;
+    state.ai = normalizeAi(data.ai);
+    state.tests = [];
+    state.myAttempts = [];
+    state.testDraft = null;
+    state.stats = null;
+    await loadState();
+    toast(`Вы вошли: ${roleLabel(state.user.role)}`);
+    haptic("success");
+    render();
+    if (state.screen === "tests") loadTests();
+  } catch (error) {
+    toast(error?.message || "Код не подошёл", "error");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = `${ICON.lock} Войти`;
+    }
   }
 }
 
@@ -2287,10 +3989,7 @@ function boot() {
   loadState()
     .then(() => {
       if (!location.hash) history.replaceState(null, "", "#/home");
-      const route = parseRoute();
-      state.screen = route.screen;
-      if (route.tab) state.tab = route.tab;
-      render();
+      applyRoute();
       syncMainButton();
     })
     .catch((error) => {

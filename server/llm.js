@@ -1,4 +1,4 @@
-const { chat, status } = require("./ai");
+const { chat } = require("./ai");
 
 function parseJson(raw) {
   const text = String(raw || "").trim();
@@ -18,8 +18,8 @@ function contextFrom(hits) {
     .slice(0, 10000);
 }
 
-async function expandQueries(query, grade) {
-  if (!status().ready) return [];
+async function expandQueries(query, grade, ctx) {
+  if (!ctx) return [];
   try {
     const raw = await chat([
       {
@@ -28,7 +28,7 @@ async function expandQueries(query, grade) {
           "Ты ищешь формулировки в школьном учебнике. По теме учителя предложи 2 короткие поисковые фразы на русском: термины и процессы, которые параграф обычно называет рядом. Не уходи в другую тему и не добавляй факты. Ответ — только JSON: {\"queries\":[\"фраза\",\"фраза\"]}",
       },
       { role: "user", content: `Тема: ${query}\nКласс: ${grade || "не указан"}` },
-    ]);
+    ], ctx);
     const parsed = parseJson(raw);
     const origin = String(query).toLowerCase().replace(/\s+/g, " ").trim();
     return [...new Set((parsed.queries || []).map((q) => String(q).trim()).filter((q) => q.length > 2 && q.length < 80))]
@@ -112,13 +112,12 @@ const SYSTEM_TEST = [
   "Ответ — только JSON {\"items\":[...]}, без пояснений вокруг.",
 ].join("\n");
 
-async function writeTest(topic, hits, count = 8) {
-  const info = status();
-  if (!info.ready) return null;
+async function writeTest(topic, hits, count = 8, ctx) {
+  if (!ctx) return null;
   const raw = await chat([
     { role: "system", content: SYSTEM_TEST },
     { role: "user", content: `Тема: ${topic}\nЧисло заданий: ${count}\n\nФрагменты:\n${contextFrom(hits)}` },
-  ]);
+  ], ctx);
   return sanitizeTest(parseJson(raw), hits, topic, count);
 }
 
