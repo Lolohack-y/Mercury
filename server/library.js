@@ -1,5 +1,6 @@
 const store = require("./store");
 const { ingestFile } = require("./ingest");
+const { keepUpload } = require("./media");
 
 async function indexUpload({ filePath, originalname, title, publisher, subject, grade }) {
   const ingested = await ingestFile(filePath, originalname);
@@ -11,6 +12,8 @@ async function indexUpload({ filePath, originalname, title, publisher, subject, 
     subject: subject || "",
     grade: grade || "",
     filename: originalname,
+    file: keepUpload(id, filePath, originalname, "text"),
+    format: require("path").extname(originalname || "").toLowerCase().slice(1),
     createdAt: new Date().toISOString(),
     pages: ingested.pages.length,
     note: ingested.meta?.note,

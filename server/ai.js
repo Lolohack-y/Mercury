@@ -1,32 +1,26 @@
-// ИИ: общий пул ключей с ротацией, личные ключи пользователей, лимиты и статистика.
-const crypto = require("crypto");
 const https = require("https");
 const store = require("./store");
-const auth = require("./auth");
-const stats = require("./stats");
-
-const NAMES = {
-  gigachat: "GigaChat",
-  yandex: "Алиса",
-  openai: "OpenAI",
-};
 
 function sberRequest(url, { method, headers, body, timeout = 45000 }) {
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { method, headers, rejectUnauthorized: false, timeout }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        let data = {};
-        try {
-          data = text ? JSON.parse(text) : {};
-        } catch {
-          data = { message: text.slice(0, 180) };
-        }
-        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data });
-      });
-    });
+    const req = https.request(
+      url,
+      { method, headers, rejectUnauthorized: false, timeout },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            data = { message: text.slice(0, 180) };
+          }
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, data });
+        });
+      }
+    );
     req.on("error", reject);
     req.on("timeout", () => req.destroy(new Error("GigaChat не ответил вовремя")));
     if (body) req.write(body);
@@ -34,168 +28,80 @@ function sberRequest(url, { method, headers, body, timeout = 45000 }) {
   });
 }
 
-function envList(...names) {
-  const out = [];
-  for (const name of names) {
-    const raw = String(process.env[name] || "");
-    if (!raw) continue;
-    for (const part of raw.split(/[,\n;]+/)) {
-      const value = part.trim();
-      if (value) out.push(value);
-    }
-  }
-  return out;
-}
+const NAMES = {
+  gigachat: "GigaChat",
+  yandex: "Алиса",
+  openai: "OpenAI",
+};
 
-function cleanKey(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^Basic\s+/i, "")
-    .replace(/^Api-Key\s+/i, "")
-    .replace(/\s+/g, "");
-}
-
-function keyId(provider, key, folder = "") {
-  const hash = crypto.createHash("sha256").update(`${provider}|${key}|${folder}`).digest("hex").slice(0, 12);
-  return `${provider}:${hash}`;
-}
-
-function legacyFile() {
+function saved() {
   return store.loadJson("ai.json", {});
 }
 
-function sharedEntries() {
-  const file = legacyFile();
-  const folder = String(process.env.YANDEX_FOLDER_ID || file.yandexFolder || "").trim();
-  const entries = [];
-  const seen = new Set();
-  const add = (provider, rawKey, itemFolder = "", label = "") => {
-    const key = cleanKey(rawKey);
-    if (!key) return;
-    if (provider === "yandex" && !String(itemFolder || "").trim()) return;
-    const id = keyId(provider, key, itemFolder);
-    if (seen.has(id)) return;
-    seen.add(id);
-    entries.push({ id, provider, key, folder: itemFolder || "", label: label || "pool" });
-  };
-  for (const key of envList("GIGACHAT_AUTH_KEYS", "GIGACHAT_AUTH_KEY", "GIGACHAT_CREDENTIALS")) {
-    add("gigachat", key, "", "env");
+function envKey(...names) {
+  for (const name of names) {
+    const value = String(process.env[name] || "").trim();
+    if (value) return value;
   }
-  if (file.gigachatKey) add("gigachat", file.gigachatKey, "", "ai.json");
-  for (const key of envList("YANDEX_API_KEYS", "YANDEX_API_KEY")) add("yandex", key, folder, "env");
-  if (file.yandexKey) add("yandex", file.yandexKey, file.yandexFolder || folder, "ai.json");
-  for (const key of envList("OPENAI_API_KEYS", "OPENAI_API_KEY")) add("openai", key, "", "env");
-  if (file.openaiKey) add("openai", file.openaiKey, "", "ai.json");
-  return entries;
+  return "";
 }
 
-function poolState() {
-  const value = store.loadJson("ai-pool.json", {});
-  return value && typeof value === "object" ? value : {};
-}
-
-function savePoolState(value) {
-  store.saveJson("ai-pool.json", value);
-}
-
-function preferredProvider() {
-  const file = legacyFile();
+function settings() {
+  const file = saved();
+  const gigachatKey = String(file.gigachatKey || envKey("GIGACHAT_AUTH_KEY", "GIGACHAT_CREDENTIALS")).trim();
+  const yandexKey = String(file.yandexKey || envKey("YANDEX_API_KEY")).trim();
+  const yandexFolder = String(file.yandexFolder || envKey("YANDEX_FOLDER_ID")).trim();
+  const openaiKey = envKey("OPENAI_API_KEY");
   const requested = String(file.provider || process.env.AI_PROVIDER || "").trim();
-  return ["gigachat", "yandex", "openai"].includes(requested) ? requested : "gigachat";
-}
-
-function ownEntries(user) {
-  const keys = auth.getUserKeys(user);
-  const entries = [];
-  if (keys.gigachat) entries.push({ id: "own:gigachat", provider: "gigachat", key: keys.gigachat, own: true });
-  if (keys.yandex?.key) {
-    entries.push({ id: "own:yandex", provider: "yandex", key: keys.yandex.key, folder: keys.yandex.folder, own: true });
-  }
-  if (keys.openai) entries.push({ id: "own:openai", provider: "openai", key: keys.openai, own: true });
-  return entries;
-}
-
-function candidates(user, { onlyOwn = false, system = false } = {}) {
-  const own = user ? ownEntries(user) : [];
-  const pref = preferredProvider();
-  const order = (list) =>
-    list.slice().sort((a, b) => {
-      const pa = a.provider === pref ? 0 : 1;
-      const pb = b.provider === pref ? 0 : 1;
-      if (pa !== pb) return pa - pb;
-      return String(a.provider).localeCompare(String(b.provider));
-    });
-  if (own.length) return order(own);
-  if (onlyOwn) return [];
-  if (!system && user && !own.length) {
-    // личных ключей нет — используем общий пул
-  }
-  const state = poolState();
-  const now = Date.now();
-  const shared = sharedEntries().map((entry) => {
-    const saved = state[entry.id] || {};
-    return {
-      ...entry,
-      own: false,
-      cooldownUntil: Number(saved.cooldownUntil) || 0,
-      lastUsed: Number(saved.lastUsed) || 0,
-      fails: Number(saved.fails) || 0,
-    };
-  });
-  const available = shared.filter((entry) => entry.cooldownUntil <= now);
-  return available.sort((a, b) => {
-    const pa = a.provider === pref ? 0 : 1;
-    const pb = b.provider === pref ? 0 : 1;
-    if (pa !== pb) return pa - pb;
-    if (a.lastUsed !== b.lastUsed) return a.lastUsed - b.lastUsed;
-    return a.fails - b.fails;
-  });
-}
-
-function statusFor(user) {
-  const own = user ? ownEntries(user) : [];
-  const shared = sharedEntries();
-  const providers = [...new Set([...own.map((entry) => entry.provider), ...shared.map((entry) => entry.provider)])];
-  const pref = preferredProvider();
-  const provider = providers.includes(pref) ? pref : providers[0] || pref;
-  const authenticated = Boolean(user);
-  const ready = authenticated && providers.length > 0;
-  const quota = auth.quotaFor(user);
-  return {
-    ready,
-    provider,
-    name: NAMES[provider] || provider,
-    authenticated,
-    role: user?.role || "guest",
-    source: own.length ? "own" : shared.length ? "shared" : "none",
-    ownKey: own.length > 0,
-    ownProviders: own.map((entry) => entry.provider),
-    providers: providers.map((id) => ({ id, name: NAMES[id] || id })),
-    pool: {
-      keys: shared.length,
-      providers: [...new Set(shared.map((entry) => entry.provider))],
-    },
-    quota,
-    reason: !authenticated ? "auth" : !providers.length ? "no_keys" : "",
-  };
+  const available = [
+    gigachatKey ? "gigachat" : "",
+    yandexKey && yandexFolder ? "yandex" : "",
+    openaiKey ? "openai" : "",
+  ].filter(Boolean);
+  const provider = available.includes(requested) ? requested : available[0] || requested || "gigachat";
+  return { provider, gigachatKey, yandexKey, yandexFolder, openaiKey, available };
 }
 
 function status() {
-  const info = statusFor(null);
-  return { ...info, ready: sharedEntries().length > 0 };
+  const cfg = settings();
+  const ready = cfg.available.includes(cfg.provider);
+  return {
+    provider: cfg.provider,
+    name: NAMES[cfg.provider] || cfg.provider,
+    ready,
+    gigachat: Boolean(cfg.gigachatKey),
+    yandex: Boolean(cfg.yandexKey && cfg.yandexFolder),
+    folder: cfg.yandexFolder || "",
+  };
 }
 
-let tokenCache = new Map();
+function saveSettings({ provider, key, folder }) {
+  const current = saved();
+  const next = { ...current };
+  if (provider === "gigachat" || provider === "yandex" || provider === "openai") next.provider = provider;
+  const secret = String(key || "").trim();
+  if (secret && next.provider === "yandex") next.yandexKey = secret.replace(/^Api-Key\s+/i, "");
+  else if (secret && next.provider !== "openai") {
+    next.gigachatKey = secret.replace(/^Basic\s+/i, "").replace(/\s+/g, "");
+    next.provider = next.provider || "gigachat";
+  }
+  if (folder && String(folder).trim()) next.yandexFolder = String(folder).trim();
+  store.saveJson("ai.json", next);
+  token = null;
+  return status();
+}
 
-async function gigachatToken(entry) {
-  const cached = tokenCache.get(entry.id);
-  if (cached && Date.now() < cached.until - 60_000) return cached.token;
+let token = null;
+let tokenUntil = 0;
+
+async function gigachatToken(key) {
+  if (token && Date.now() < tokenUntil - 60_000) return token;
   const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
   const res = await sberRequest("https://ngw.devices.sberbank.ru:9443/api/v2/oauth", {
     method: "POST",
     headers: {
-      Authorization: `Basic ${entry.key}`,
-      RqUID: crypto.randomUUID(),
+      Authorization: `Basic ${key}`,
+      RqUID: require("crypto").randomUUID(),
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
@@ -204,20 +110,40 @@ async function gigachatToken(entry) {
   });
   const data = res.data || {};
   if (!res.ok || !data.access_token) {
-    const error = new Error(data.message || data.error_description || "GigaChat не принял ключ авторизации");
-    error.statusCode = res.status || 401;
-    throw error;
+    throw new Error(data.message || data.error_description || "GigaChat не принял ключ авторизации");
   }
+  token = data.access_token;
   let until = Number(data.expires_at) || 0;
   if (until && until < 1e12) until *= 1000;
-  tokenCache.set(entry.id, { token: data.access_token, until: until || Date.now() + 25 * 60 * 1000 });
-  return data.access_token;
+  tokenUntil = until || Date.now() + 25 * 60 * 1000;
+  return token;
 }
 
-async function gigachatChat(entry, messages) {
-  const access = await gigachatToken(entry);
-  const model = process.env.GIGACHAT_MODEL || "GigaChat";
-  const payload = JSON.stringify({ model, temperature: 0.2, messages });
+const GIGACHAT_PREFERRED = ["GigaChat-2", "GigaChat", "GigaChat-2-Pro", "GigaChat-Pro", "GigaChat-2-Max", "GigaChat-Max", "GigaChat-3-Ultra"];
+
+function gigachatError(data) {
+  return data?.message || data?.error?.message || data?.error_description || "";
+}
+
+async function gigachatModelIds(access) {
+  const res = await sberRequest("https://api.giga.chat/v1/models", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" },
+    timeout: 20000,
+  });
+  const list = Array.isArray(res.data?.data) ? res.data.data : [];
+  return list.filter((m) => !m.type || m.type === "chat").map((m) => m.id).filter(Boolean);
+}
+
+function chooseGigachatModel(ids) {
+  const wanted = String(process.env.GIGACHAT_MODEL || "").trim();
+  if (wanted && (!ids.length || ids.includes(wanted))) return wanted;
+  for (const name of GIGACHAT_PREFERRED) if (ids.includes(name)) return name;
+  return ids[0] || "GigaChat-2";
+}
+
+async function gigachatComplete(access, model, messages) {
+  const payload = JSON.stringify({ model, temperature: 0.2, max_tokens: 4096, messages });
   const res = await sberRequest("https://api.giga.chat/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -227,287 +153,122 @@ async function gigachatChat(entry, messages) {
     },
     body: payload,
   });
-  const data = res.data || {};
-  if (!res.ok) {
-    const error = new Error(data.message || "GigaChat не ответил");
-    error.statusCode = res.status;
-    throw error;
-  }
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error("GigaChat вернул пустой ответ");
-  return text;
+  return { ok: res.ok, data: res.data || {}, model };
 }
 
-async function yandexChat(entry, messages) {
-  const model = process.env.YANDEX_MODEL || "yandexgpt-lite";
+const SLIDE_MODELS = ["GigaChat-2-Max", "GigaChat-Max", "GigaChat-2-Pro", "GigaChat-Pro", "GigaChat-2", "GigaChat"];
+
+function chooseSlideModel(ids) {
+  const wanted = String(process.env.GIGACHAT_SLIDE_MODEL || "").trim();
+  if (wanted && (!ids.length || ids.includes(wanted))) return wanted;
+  if (!ids.length) return chooseGigachatModel(ids);
+  for (const name of SLIDE_MODELS) if (ids.includes(name)) return name;
+  return chooseGigachatModel(ids);
+}
+
+async function gigachatChat(messages, preferred) {
+  const cfg = settings();
+  const access = await gigachatToken(cfg.gigachatKey);
+  const ids = await gigachatModelIds(access).catch(() => []);
+  let model = preferred === "slides" ? chooseSlideModel(ids) : preferred || chooseGigachatModel(ids);
+  if (ids.length && !ids.includes(model)) model = chooseGigachatModel(ids);
+  let result = await gigachatComplete(access, model, messages);
+  const missing = /model|модел/i.test(gigachatError(result.data));
+  if (!result.ok && missing) {
+    const pool = (ids.length ? ids : GIGACHAT_PREFERRED).filter((id) => id !== model);
+    if (pool.length) {
+      model = pool[0];
+      result = await gigachatComplete(access, model, messages);
+    }
+  }
+  if (!result.ok) {
+    const why = gigachatError(result.data) || "GigaChat не ответил";
+    const known = ids.length ? ` Доступны: ${ids.slice(0, 6).join(", ")}.` : "";
+    throw new Error(`${why}.${known}`);
+  }
+  const text = result.data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("GigaChat вернул пустой ответ");
+  return { text, model };
+}
+
+async function yandexChat(messages, modelName) {
+  const cfg = settings();
+  const model = modelName || process.env.YANDEX_MODEL || "yandexgpt-lite";
   const res = await fetch("https://llm.api.cloud.yandex.net/foundationModels/v1/completion", {
     method: "POST",
     headers: {
-      Authorization: `Api-Key ${entry.key}`,
+      Authorization: `Api-Key ${cfg.yandexKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      modelUri: `gpt://${entry.folder}/${model}/latest`,
+      modelUri: `gpt://${cfg.yandexFolder}/${model}/latest`,
       completionOptions: { stream: false, temperature: 0.2, maxTokens: "2500" },
       messages: messages.map((m) => ({ role: m.role, text: m.content })),
     }),
     signal: AbortSignal.timeout(45000),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const error = new Error(data.error?.message || data.message || "Алиса не ответила");
-    error.statusCode = res.status;
-    throw error;
-  }
+  if (!res.ok) throw new Error(data.error?.message || data.message || "Алиса не ответила");
   const text = data.result?.alternatives?.[0]?.message?.text;
   if (!text) throw new Error("Алиса вернула пустой ответ");
-  return text;
+  return { text, model: model === "yandexgpt" ? "Алиса Pro" : "Алиса" };
 }
 
-async function openaiChat(entry, messages) {
+async function openaiChat(messages, modelName) {
+  const cfg = settings();
   const base = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const model = modelName || process.env.OPENAI_MODEL || "gpt-4o-mini";
   const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${entry.key}`,
+      Authorization: `Bearer ${cfg.openaiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ model, temperature: 0.2, messages }),
     signal: AbortSignal.timeout(45000),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const error = new Error(data.error?.message || "Модель не ответила");
-    error.statusCode = res.status;
-    throw error;
-  }
+  if (!res.ok) throw new Error(data.error?.message || "Модель не ответила");
   const text = data.choices?.[0]?.message?.content;
   if (!text) throw new Error("Модель вернула пустой ответ");
-  return text;
+  return { text, model };
 }
 
-function callProvider(entry, messages) {
-  if (entry.provider === "yandex") return yandexChat(entry, messages);
-  if (entry.provider === "openai") return openaiChat(entry, messages);
-  return gigachatChat(entry, messages);
-}
-
-function cooldownFor(error) {
-  const statusCode = Number(error?.statusCode || error?.status) || 0;
-  const message = String(error?.message || "").toLowerCase();
-  if (statusCode === 401 || statusCode === 403) return 24 * 60 * 60 * 1000;
-  if (statusCode === 429 || /limit|quota|превыш|rate|слишком много/i.test(message)) {
-    return Math.max(1, Number(process.env.AI_KEY_COOLDOWN_MIN || 30)) * 60 * 1000;
-  }
-  if (/timeout|timed out|не ответил|fetch failed|enotfound|econn/i.test(message)) return 2 * 60 * 1000;
-  return 10 * 60 * 1000;
-}
-
-function touchPool(entry, ok, error) {
-  if (entry.own) return;
-  const state = poolState();
-  const row = state[entry.id] || { fails: 0, cooldownUntil: 0, lastUsed: 0 };
-  row.lastUsed = Date.now();
-  if (ok) {
-    row.fails = 0;
-    row.cooldownUntil = 0;
-    row.lastError = "";
-    row.lastOkAt = new Date().toISOString();
-  } else {
-    row.fails = (Number(row.fails) || 0) + 1;
-    row.cooldownUntil = Date.now() + cooldownFor(error);
-    row.lastError = String(error?.message || "ошибка").slice(0, 240);
-  }
-  state[entry.id] = row;
-  savePoolState(state);
-}
-
-async function chat(messages, ctx = {}) {
-  const user = ctx.user || null;
-  const system = Boolean(ctx.system);
-  if (!user && !system) {
-    const error = new Error("ИИ доступен после входа через MAX");
-    error.status = 401;
-    throw error;
-  }
-  const list = candidates(user, { onlyOwn: Boolean(ctx.onlyOwn), system });
-  if (!list.length) {
-    const error = new Error(
-      user
-        ? "ИИ не подключён: нет общего ключа. Добавьте свой ключ в настройках."
-        : "ИИ не подключён: администратор не настроил общий пул ключей."
-    );
+function assertReady() {
+  const cfg = settings();
+  if (!cfg.available.includes(cfg.provider)) {
+    const error = new Error("Нейросеть не подключена");
     error.status = 400;
     throw error;
   }
-  let lastError = null;
-  for (const entry of list) {
-    const started = Date.now();
-    try {
-      const text = await callProvider(entry, messages);
-      touchPool(entry, true);
-      if (!ctx.silent) {
-        stats.recordAi({
-          userId: user?.id || "system",
-          userName: user?.name || "Система",
-          provider: entry.provider,
-          source: entry.own ? "own" : "shared",
-          ok: true,
-          ms: Date.now() - started,
-        });
-      }
-      return text;
-    } catch (error) {
-      lastError = error;
-      touchPool(entry, false, error);
-      if (!ctx.silent) {
-        stats.recordAi({
-          userId: user?.id || "system",
-          userName: user?.name || "Система",
-          provider: entry.provider,
-          source: entry.own ? "own" : "shared",
-          ok: false,
-          ms: Date.now() - started,
-          error: error.message,
-        });
-      }
-    }
-  }
-  const error = new Error(
-    list.length > 1
-      ? `Не удалось получить ответ ИИ: ${lastError?.message || "все ключи временно недоступны"}`
-      : lastError?.message || "ИИ не ответил"
-  );
-  error.status = lastError?.statusCode === 401 ? 401 : 502;
-  throw error;
+  return cfg;
 }
 
-function beginRequest(user) {
-  if (!user) {
-    const error = new Error("ИИ доступен после входа через MAX");
-    error.status = 401;
-    error.code = "auth_required";
-    throw error;
-  }
-  const info = statusFor(user);
-  if (!info.ready) {
-    const error = new Error("ИИ не подключён: нет общего ключа. Добавьте свой ключ в настройках.");
-    error.status = 400;
-    error.code = "no_keys";
-    throw error;
-  }
-  const quota = auth.consumeQuota(user);
-  if (!quota.ok) {
-    const error = new Error(
-      quota.reason === "limit"
-        ? `Лимит ИИ: ${quota.quota.limit} запросов в день. Свой ключ в настройках снимает ограничение.`
-        : "ИИ доступен после входа через MAX"
-    );
-    error.status = quota.reason === "limit" ? 429 : 401;
-    error.code = quota.reason;
-    error.quota = quota.quota;
-    throw error;
-  }
-  return { user, unlimited: Boolean(quota.unlimited), quota: quota.quota };
+async function chat(messages) {
+  const cfg = assertReady();
+  const result = cfg.provider === "yandex" ? await yandexChat(messages) : cfg.provider === "openai" ? await openaiChat(messages) : await gigachatChat(messages);
+  return result.text;
 }
 
-function finishRequest(_ctx, _info) {
-  // Запрос уже учтён при старте; статистика пишется на каждый вызов модели.
+async function chatSlides(messages) {
+  const cfg = assertReady();
+  if (cfg.provider === "yandex") return yandexChat(messages, process.env.YANDEX_SLIDE_MODEL || "yandexgpt");
+  if (cfg.provider === "openai") return openaiChat(messages, process.env.OPENAI_SLIDE_MODEL || "gpt-4o");
+  return gigachatChat(messages, "slides");
 }
 
-async function ping(user, { onlyOwn = false } = {}) {
-  const fresh = user?.id ? auth.findUser(user.id) || user : user;
-  const info = statusFor(fresh);
-  if (!info.ready) {
-    return {
-      ...info,
-      ok: false,
-      error: info.authenticated ? "ИИ не подключён: добавьте ключ" : "Войдите через MAX",
-    };
-  }
+async function ping() {
+  const info = status();
+  if (!info.ready) return { ...info, ok: false, error: "Вставьте ключ и нажмите «Подключить»" };
   try {
-    const text = await chat(
-      [
-        { role: "system", content: "Ответь одним словом: готово" },
-        { role: "user", content: "Проверка связи" },
-      ],
-      { user: fresh, onlyOwn, silent: true }
-    );
+    const text = await chat([
+      { role: "system", content: "Ответь одним словом: готово" },
+      { role: "user", content: "Проверка связи" },
+    ]);
     return { ...info, ok: true, sample: String(text).slice(0, 80) };
-  } catch (error) {
-    return { ...info, ok: false, error: error.message || "Не удалось связаться с моделью" };
+  } catch (e) {
+    return { ...info, ok: false, error: e.message || "Не удалось связаться с моделью" };
   }
 }
 
-async function saveUserKey(user, { provider, key, folder }) {
-  const name = String(provider || "").toLowerCase();
-  if (!["gigachat", "yandex", "openai"].includes(name)) throw new Error("Выберите провайдера ИИ");
-  auth.setUserKey(user.id, name, key, folder);
-  const fresh = auth.findUser(user.id);
-  const result = await ping(fresh, { onlyOwn: true });
-  if (!result.ok) {
-    auth.clearUserKey(user.id, name);
-    throw new Error(result.error || "Ключ не прошёл проверку");
-  }
-  return result;
-}
-
-function clearUserKey(user, provider) {
-  auth.clearUserKey(user.id, provider);
-  return statusFor(auth.findUser(user.id) || user);
-}
-
-function saveSettings({ provider, key, folder }) {
-  const current = legacyFile();
-  const next = { ...current };
-  if (["gigachat", "yandex", "openai"].includes(provider)) next.provider = provider;
-  const secret = cleanKey(key);
-  if (secret && next.provider === "yandex") next.yandexKey = secret;
-  else if (secret && next.provider === "openai") next.openaiKey = secret;
-  else if (secret) next.gigachatKey = secret;
-  if (folder && String(folder).trim()) next.yandexFolder = String(folder).trim();
-  store.saveJson("ai.json", next);
-  tokenCache = new Map();
-  return status();
-}
-
-function poolInfo() {
-  const state = poolState();
-  const now = Date.now();
-  const keys = sharedEntries().map((entry) => {
-    const saved = state[entry.id] || {};
-    return {
-      id: entry.id,
-      provider: entry.provider,
-      name: NAMES[entry.provider] || entry.provider,
-      label: entry.label,
-      tail: entry.key.slice(-4),
-      cooldownUntil: Number(saved.cooldownUntil) || 0,
-      available: (Number(saved.cooldownUntil) || 0) <= now,
-      fails: Number(saved.fails) || 0,
-      lastUsed: Number(saved.lastUsed) || 0,
-      lastError: saved.lastError || "",
-    };
-  });
-  return {
-    total: keys.length,
-    available: keys.filter((item) => item.available).length,
-    providers: [...new Set(keys.map((item) => item.provider))],
-    keys,
-  };
-}
-
-module.exports = {
-  NAMES,
-  status,
-  statusFor,
-  chat,
-  ping,
-  beginRequest,
-  finishRequest,
-  saveUserKey,
-  clearUserKey,
-  saveSettings,
-  poolInfo,
-};
+module.exports = { status, saveSettings, chat, chatSlides, ping };

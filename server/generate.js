@@ -1,4 +1,5 @@
-const { lowerFirst, upperFirst, clip } = require("./text");
+const store = require("./store");
+const { lowerFirst, upperFirst, clip, splitSentences } = require("./text");
 const { buildQuiz, pageKey } = require("./quiz");
 
 function cite(hit) {
@@ -79,7 +80,105 @@ function titleOf(text) {
 
 // Для пункта списка название — сам пункт, а не общий заголовок списка.
 function titleOfFact(f) {
-  return f.item ? upperFirst(clip(String(f.raw || f.text).replace(/[.;]+$/, ""), 56)).replace(/…$/, "") : titleOf(f.text);
+  if (f.item) return upperFirst(clip(String(f.raw || f.text).replace(/[.;]+$/, ""), 56)).replace(/…$/, "");
+  if (f.kind) return statementTitle(f.text);
+  return titleOf(f.text);
+}
+
+const DANGLING = /^(хотя|бы|при|или|то|не|его|её|ее|один|если|что|как|это|для|по|об|от|до|из|на|со|во)$/i;
+const SPLIT_OK = new Set("и в во не на с со как а то он она так но да ты к у же вы за бы по от из о до ни же ли бы то же".split(" "));
+
+function brokenSplit(text) {
+  const parts = String(text || "")
+    .toLowerCase()
+    .split(/[^а-яё]+/)
+    .filter(Boolean);
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    if (parts[i].length >= 2 && parts[i].length <= 3 && parts[i + 1].length >= 2 && parts[i + 1].length <= 3 && !SPLIT_OK.has(parts[i]) && !SPLIT_OK.has(parts[i + 1])) return true;
+  }
+  return false;
+}
+
+function classifyStatement(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (t.length < 40 || brokenSplit(t)) return "junk";
+  if (/\?$/.test(t) || /[.]{4,}/.test(t)) return "junk";
+  if (/^вы(?=\s)/i.test(t)) return "junk";
+  if (/^(найдите|решите|докажите|упростите|постройте|выпишите|приведите|напишите|является ли|верно ли)(?=\s)/i.test(t)) return "junk";
+  if (/называ(?:ют|ется)/i.test(t) || /^если(?=\s)[\s\S]{12,}\sто(?=\s)/i.test(t)) return "def";
+  if (/^(в этой главе|в этом параграфе|отсюда|такие|например|заметим|рассмотрим|вообще|следовательно|значит|затем|ответ)(?=\s|,)/i.test(t)) return "junk";
+  if (/^[=\d(]/.test(t) && !/[а-яё]{6,}/i.test(t.slice(0, 40))) return "junk";
+  return "ok";
+}
+
+function statementTitle(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  const called = /называ(?:ют|ется)(?:\s+ещё)?\s+([^.,;]{3,70})/i.exec(t);
+  if (called) return upperFirst(called[1].trim());
+  const via = titleOf(t);
+  if (via && via.length >= 3 && !DANGLING.test(via.split(" ").pop())) return via;
+  const words = t.replace(/[.;:]+$/, "").split(" ");
+  let n = Math.min(5, words.length);
+  while (n > 2 && DANGLING.test(words[n - 1])) n -= 1;
+  return upperFirst(words.slice(0, n).join(" "));
+}
+
+function teachFacts(hits, limit = 8) {
+  const pool = [];
+  const pages = [];
+  const seenPages = new Set();
+  const all = store.getState().chunks;
+  for (const hit of hits.slice(0, 1)) {
+    for (const delta of [0, 1, -1]) {
+      const page = Number(hit.chunk.page) + delta;
+      const key = `${hit.chunk.bookId}:${page}`;
+      if (seenPages.has(key)) continue;
+      seenPages.add(key);
+      const chunk = delta === 0 ? hit.chunk : all.find((item) => item.bookId === hit.chunk.bookId && Number(item.page) === page);
+      if (chunk) pages.push({ chunk, neighbor: delta !== 0 });
+    }
+  }
+  for (const hit of hits) {
+    const key = `${hit.chunk.bookId}:${hit.chunk.page}`;
+    if (seenPages.has(key)) continue;
+    seenPages.add(key);
+    pages.push({ chunk: hit.chunk, neighbor: false });
+  }
+  for (const { chunk, neighbor } of pages) {
+    for (const sentence of splitSentences(chunk.text)) {
+      const text = String(sentence.text || "").replace(/\s+/g, " ").trim();
+      const kind = classifyStatement(text);
+      if (kind === "junk" || (neighbor && !/называется/i.test(text))) continue;
+      pool.push({
+        text,
+        raw: text,
+        lead: "",
+        item: 0,
+        idx: sentence.idx,
+        page: chunk.page,
+        book: chunk.bookTitle,
+        bookId: chunk.bookId,
+        kind,
+      });
+    }
+  }
+  const rank = (fact) => {
+    if (/называется/i.test(fact.text)) return 0;
+    if (fact.kind === "def" && !/^такие(?=\s)/i.test(fact.text)) return 1;
+    if (fact.kind === "def") return 2;
+    return 3;
+  };
+  pool.sort((a, b) => rank(a) - rank(b) || Number(a.page) - Number(b.page) || a.idx - b.idx);
+  const chosen = [];
+  const seen = new Set();
+  for (const fact of pool) {
+    const key = fact.text.toLowerCase().replace(/[^a-zа-яё0-9]+/gi, " ").split(" ").slice(0, 7).join(" ");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    chosen.push(fact);
+    if (chosen.length >= limit) break;
+  }
+  return chosen;
 }
 
 function scheme(topic, facts) {
@@ -137,15 +236,58 @@ function infographic(topic, facts) {
   };
 }
 
+function yearOf(text) {
+  const m = String(text || "").match(/(?:^|[^\d])((?:1[0-9]{3}|20[0-9]{2}))(?:\s*(?:года|году|год|г\.))?(?!\d)/);
+  return m ? Number(m[1]) : 0;
+}
+
 function slides(topic, facts, brand) {
+  const list = facts.slice(0, 8);
   const body = [
-    { title: topic, bullets: [`По учебнику • ${brand.school}`, "Материал с указанием страниц"] },
-    ...facts.slice(0, 6).map((f) => ({
-      title: titleOfFact(f),
-      bullets: [f.text, `Источник: ${f.book}, с. ${f.page}`],
-    })),
-    { title: "Проверьте по учебнику", bullets: facts.slice(0, 4).map((f) => `с. ${f.page}`) },
+    {
+      layout: "text",
+      title: topic,
+      bullets: [
+        list[0] ? clip(list[0].text, 280) : "Фрагменты по теме не найдены.",
+        list[1] ? clip(list[1].text, 220) : "",
+        `${brand.school || "Наглядность+"}. ${list.length} положений из учебника, у каждого есть страница.`,
+      ].filter(Boolean),
+    },
   ];
+  for (const f of list.slice(0, 5)) {
+    body.push({
+      layout: "text",
+      title: titleOfFact(f),
+      bullets: [clip(f.text, 320), f.lead ? `Контекст: ${clip(f.lead, 120)}` : "", `${f.book}, с. ${f.page}`].filter(Boolean),
+    });
+  }
+  if (list.length >= 3) {
+    body.push({
+      layout: "table",
+      title: "Сводка по учебнику",
+      headers: ["О чём речь", "Формулировка", "Стр."],
+      rows: list.slice(0, 6).map((f) => [clip(titleOfFact(f), 40), clip(f.text, 90), String(f.page)]),
+    });
+  }
+  const timeline = [];
+  const seen = new Set();
+  for (const f of facts) {
+    const year = yearOf(f.raw || f.text);
+    if (!year) continue;
+    const label = `${year}. ${clip(titleOfFact(f), 42)}`;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    timeline.push({ label, value: year });
+  }
+  timeline.sort((a, b) => a.value - b.value);
+  if (timeline.length >= 3) {
+    body.push({ layout: "bars", title: "Хронология по учебнику", series: timeline.slice(0, 6) });
+  }
+  body.push({
+    layout: "text",
+    title: "Что сверить в учебнике",
+    bullets: list.slice(0, 5).map((f) => `с. ${f.page}. ${clip(f.text, 140)}`),
+  });
   return { kind: "presentation", topic, slides: body };
 }
 
@@ -169,16 +311,16 @@ function tests(topic, hits, facts, { bank = [], count = 8, variant = 0 } = {}) {
 
 function buildAll(topic, hits, brand, opts = {}) {
   const facts = factsFromHits(hits);
+  const taught = teachFacts(hits);
   const sources = hits.map(cite);
   return {
     topic,
     sources,
     materials: {
-      scheme: scheme(topic, facts),
-      table: table(topic, facts),
-      cards: cards(topic, facts),
-      infographic: infographic(topic, facts),
-      presentation: slides(topic, facts, brand),
+      scheme: scheme(topic, taught.length ? taught : facts),
+      table: table(topic, taught.length ? taught : facts),
+      cards: cards(topic, taught.length ? taught : facts),
+      infographic: infographic(topic, taught.length ? taught : facts),
       test: tests(topic, hits, facts, opts),
     },
   };

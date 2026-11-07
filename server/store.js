@@ -50,7 +50,7 @@ function saveBrand(brand) {
 
 function cacheKey(payload) {
   return JSON.stringify({
-    v: 5,
+    v: 9,
     count: payload.count || 8,
     ai: payload.ai || "",
     q: String(payload.query || "").toLowerCase().trim(),

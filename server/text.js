@@ -121,15 +121,25 @@ function normalize(text) {
 // Слова запроса или текста: [{ raw, stem }]
 function words(text, { dropAsk = false } = {}) {
   const out = [];
-  const re = /[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)*|\d{3,4}/g;
-  for (const m of String(text || "").matchAll(re)) {
+  const prepared = prepareMath(text);
+  const re = /\d+(?:[.,]\d+)?(?:\/\d+(?:[.,]\d+)?)?|[A-Za-z]+\d*|[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*/g;
+  for (const m of prepared.matchAll(re)) {
     const raw = m[0];
     const low = normalize(raw);
-    if (/^\d+$/.test(low)) {
+    const latin = /^[a-z]+\d*$/.test(low);
+    const numeric = /^\d/.test(low);
+    if (numeric) {
+      if (low.length > 6) continue;
       out.push({ raw, stem: low });
       continue;
     }
-    if (low.length < 3 || STOP.has(low)) continue;
+    if (latin) {
+      if (low.length > 24) continue;
+      out.push({ raw, stem: low });
+      continue;
+    }
+    if (low.length < 3 && low !== "пи") continue;
+    if (STOP.has(low)) continue;
     if (dropAsk && ASK_WORDS.has(low)) continue;
     out.push({ raw, stem: stem(low) });
   }
@@ -144,17 +154,48 @@ const ABBR =
   /(^|[\s(«"])(т\.\s?е|т\.\s?д|т\.\s?п|т\.\s?к|т\.\s?н|и\s?др|и\s?пр|см|рис|табл|стр|гг?|вв?|им|ок|др|проф|акад|ул|руб|тыс|млн|млрд|напр|с|н\.\s?э|до\s?н\.\s?э)\./gi;
 const DOT = "\u2024";
 
+const SUPER_DIGIT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+
+function toSuper(digits) {
+  return String(digits)
+    .split("")
+    .map((ch) => SUPER_DIGIT[ch] || ch)
+    .join("");
+}
+
+// Степень в PDF часто падает на отдельную строку: «5x\\n2». Возвращаем x².
+function gluePowers(text) {
+  return String(text || "")
+    .replace(/([A-Za-z])[ \t]*\n[ \t]*(\d{1,2})[ \t]*\n/g, (_, letter, digit) => `${letter}${toSuper(digit)}\n`)
+    .replace(/([A-Za-z])[ \t]+(\d)(?=[ \t]*[+\-–—−=<>])/g, (_, letter, digit) => `${letter}${toSuper(digit)}`);
+}
+
 // Склеивает переносы и строки из PDF.
 function cleanText(text) {
-  return String(text || "")
+  return gluePowers(String(text || ""))
     .replace(/\r/g, "")
     .replace(/\u00ad/g, "")
-    .replace(/(\p{L})-\n(\p{L})/gu, "$1$2")
+    .replace(/(\p{L})-\s*\n\s*(\p{L})/gu, "$1$2")
     .replace(/\n{2,}/g, " ¶ ")
     .replace(/\s*\n\s*/g, " ")
     .replace(/ ¶ /g, "\n")
     .replace(/[ \t\u00a0]+/g, " ")
     .trim();
+}
+
+// Одинаковый вид формулы в запросе и в тексте учебника: x^2, x² и «икс квадрат» → x2.
+function prepareMath(text) {
+  let t = String(text || "")
+    .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, (ch) => String(SUPER_DIGIT.indexOf(ch)))
+    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (ch) => String("₀₁₂₃₄₅₆₇₈₉".indexOf(ch)))
+    .replace(/\^\s*(\d+)/g, "$1");
+  t = t.replace(/(^|[^\p{L}\p{N}])(икс(?:а|у|ом|е)?|игрек(?:а|у|ом|е)?)(?=$|[^\p{L}\p{N}])/giu, (m, pre, word) => {
+    return pre + (word.toLowerCase().startsWith("игр") ? "y" : "x");
+  });
+  t = t.replace(/([A-Za-z])\s+в\s+квадрате/gi, "$12");
+  t = t.replace(/([A-Za-z])\s+в\s+кубе/gi, "$13");
+  t = t.replace(/([A-Za-z])\s+квадрат(?:а|е)?/gi, "$12");
+  return t;
 }
 
 function protect(text) {
@@ -191,6 +232,10 @@ function splitSentences(text, { minLength = 25 } = {}) {
       if (clean.length < 70) continue; // заголовок параграфа, а не предложение
     }
     if (clean.length < minLength) {
+      if (/[A-Za-z][⁰¹²³⁴⁵⁶⁷⁸⁹\d]|[A-Za-z]\s*=|\d\s*[=<>]/.test(clean) && clean.length >= 3) {
+        out.push({ text: clean, lead: "", item: 0 });
+        continue;
+      }
       if (clean.length >= 4) lead = clean.replace(/[.:]$/, "");
       continue;
     }

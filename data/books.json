@@ -20,5 +20,17 @@
     "createdAt": "2026-09-25T20:08:22.027Z",
     "pages": 2,
     "demo": true
+  },
+  {
+    "id": "5de0e6f2-1a19-4ea6-9b46-456c5b787c64",
+    "title": "Алгебра, 8 класс",
+    "publisher": "УМК",
+    "subject": "Алгебра",
+    "grade": "8",
+    "filename": "1740836686__-8-klass_-makarychev-ju_-n_-i-dr-2024.pdf",
+    "file": "5de0e6f2-1a19-4ea6-9b46-456c5b787c64.pdf",
+    "format": "pdf",
+    "createdAt": "2026-10-30T18:23:01.327Z",
+    "pages": 381
   }
 ]

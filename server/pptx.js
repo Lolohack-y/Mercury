@@ -38,10 +38,119 @@ function shape({ name, x, y, cx, cy, fill, paragraphs }) {
 }
 
 function slideXml(slide, index, total, brandColor, school) {
-  const bullets = (slide.bullets || []).filter(Boolean).slice(0, 6);
-  const body = bullets.length
-    ? bullets.map((line) => paragraph(line, 2000, false, "1C1C1C", true)).join("")
-    : paragraph(" ", 2000, false, "1C1C1C", false);
+  let seq = 2;
+  const next = () => seq++;
+  const header = shape({
+    name: next(),
+    x: 0,
+    y: 0,
+    cx: 12192000,
+    cy: 731520,
+    fill: brandColor,
+    paragraphs: paragraph(school || "Наглядность+", 1400, false, "F4E7C5", false),
+  });
+  const title = shape({
+    name: next(),
+    x: 365760,
+    y: 822960,
+    cx: 11430000,
+    cy: 1005840,
+    fill: null,
+    paragraphs: paragraph(slide.title || "Слайд", 2800, true, brandColor, false),
+  });
+  const footer = shape({
+    name: next(),
+    x: 365760,
+    y: 6400800,
+    cx: 11430000,
+    cy: 320040,
+    fill: null,
+    paragraphs: paragraph(`${index + 1} / ${total}`, 1200, false, "6B6570", false),
+  });
+  const parts = [header, title];
+  if (slide.layout === "table" && (slide.rows || []).length) {
+    const headers = slide.headers || [];
+    const cols = [360000, 3900000, 9600000];
+    const widths = [3400000, 5500000, 2100000];
+    headers.forEach((h, i) => {
+      parts.push(
+        shape({
+          name: next(),
+          x: cols[i] || cols[0],
+          y: 1900000,
+          cx: widths[i] || widths[0],
+          cy: 420000,
+          fill: "E7F0EA",
+          paragraphs: paragraph(h, 1200, true, brandColor, false),
+        })
+      );
+    });
+    slide.rows.slice(0, 6).forEach((row, r) => {
+      row.slice(0, 3).forEach((cell, c) => {
+        parts.push(
+          shape({
+            name: next(),
+            x: cols[c] || cols[0],
+            y: 2360000 + r * 640000,
+            cx: widths[c] || widths[0],
+            cy: 600000,
+            fill: r % 2 ? "F3F0EA" : "FFFFFF",
+            paragraphs: paragraph(String(cell), 1200, false, "1C1C1C", false),
+          })
+        );
+      });
+    });
+  } else if (slide.layout === "bars" && (slide.series || []).length) {
+    const series = slide.series.slice(0, 6);
+    const values = series.map((s) => Number(s.value) || 0);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = Math.max(1, max - min);
+    series.forEach((item, i) => {
+      const y = 1900000 + i * 720000;
+      const width = Math.round(700000 + ((Number(item.value) - min) / span) * 5600000);
+      parts.push(
+        shape({
+          name: next(),
+          x: 365760,
+          y,
+          cx: 4600000,
+          cy: 640000,
+          fill: null,
+          paragraphs: paragraph(item.label, 1400, false, "1C1C1C", false),
+        })
+      );
+      parts.push(
+        shape({
+          name: next(),
+          x: 5100000,
+          y: y + 160000,
+          cx: width,
+          cy: 280000,
+          fill: brandColor,
+          paragraphs: paragraph(" ", 800, false, "FFFFFF", false),
+        })
+      );
+    });
+  } else {
+    const bullets = (slide.bullets || []).filter(Boolean).slice(0, 6);
+    const quote = slide.layout === "quote";
+    const body = bullets.length
+      ? bullets.map((line) => paragraph(line, quote || slide.layout === "cover" ? 2400 : 1800, false, "1C1C1C", !quote && slide.layout !== "cover")).join("")
+      : paragraph(" ", 1800, false, "1C1C1C", false);
+    parts.push(
+      shape({
+        name: next(),
+        x: 365760,
+        y: 1900000,
+        cx: 11430000,
+        cy: 4300000,
+        fill: null,
+        paragraphs: body,
+      })
+    );
+  }
+  parts.push(footer);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
   <p:cSld>
@@ -49,42 +158,7 @@ function slideXml(slide, index, total, brandColor, school) {
     <p:spTree>
       <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
       <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
-      ${shape({
-        name: 2,
-        x: 0,
-        y: 0,
-        cx: 12192000,
-        cy: 1097280,
-        fill: brandColor,
-        paragraphs: paragraph(school || "Наглядность+", 1400, false, "F4E7C5", false),
-      })}
-      ${shape({
-        name: 3,
-        x: 365760,
-        y: 1188720,
-        cx: 11430000,
-        cy: 1371600,
-        fill: null,
-        paragraphs: paragraph(slide.title || "Слайд", 3200, true, brandColor, false),
-      })}
-      ${shape({
-        name: 4,
-        x: 365760,
-        y: 2560320,
-        cx: 11430000,
-        cy: 3657600,
-        fill: null,
-        paragraphs: body,
-      })}
-      ${shape({
-        name: 5,
-        x: 365760,
-        y: 6309360,
-        cx: 11430000,
-        cy: 365760,
-        fill: null,
-        paragraphs: paragraph(`${index + 1} / ${total}`, 1200, false, "6B6570", false),
-      })}
+      ${parts.join("")}
     </p:spTree>
   </p:cSld>
   <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>

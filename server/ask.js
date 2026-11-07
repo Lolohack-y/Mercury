@@ -2,8 +2,9 @@ const store = require("./store");
 const { searchDetailed, sentenceBank } = require("./search");
 const { buildAll, applyEdit } = require("./generate");
 const { factCheck } = require("./factcheck");
-const ai = require("./ai");
-const { expandQueries, writeTest } = require("./llm");
+const { status } = require("./ai");
+const { peekQuota, takeQuota } = require("./quota");
+const { expandQueries, writeTest, writeSlides } = require("./llm");
 
 function fail(status, message) {
   const error = new Error(message);
@@ -61,14 +62,17 @@ function testTruth(test) {
   return parts;
 }
 
-async function ask({ query, type = "all", bookIds, grade, subject, skipCache, count, user } = {}) {
+async function ask({ query, type = "all", bookIds, grade, subject, skipCache, count } = {}, { teacher = false } = {}) {
   if (!query || String(query).trim().length < 2) {
     throw fail(400, "Укажите тему, например: «фотосинтез, световая фаза»");
   }
   const size = Math.max(4, Math.min(15, Number(count) || 8));
   const state = store.getState();
-  const model = ai.statusFor(user);
-  const key = store.cacheKey({ query, type, bookIds, grade, subject, count: size, ai: model.ready ? model.provider : "off" });
+  const model = status();
+  const wantsModel = teacher && model.ready && (!type || type === "all" || type === "test" || type === "presentation");
+  const quota = wantsModel ? peekQuota() : null;
+  const allowModel = Boolean(wantsModel && quota.left > 0);
+  const key = store.cacheKey({ query, type, bookIds, grade, subject, count: size, ai: allowModel ? model.provider : "off" });
   if (!skipCache && state.cache[key]) {
     return { ...state.cache[key], cached: true };
   }
@@ -80,25 +84,17 @@ async function ask({ query, type = "all", bookIds, grade, subject, skipCache, co
   const searchOpts = { bookIds: bookIds?.length ? bookIds : undefined, topK: 8, preferBooks: prefer.size ? prefer : undefined };
   const first = searchDetailed(state.chunks, query, searchOpts);
   const hits = first.hits.slice();
-  if (!hits.length) {
-    const unknown = first.meta.unknown;
-    throw fail(
-      404,
-      unknown.length
-        ? `В выбранных учебниках нет слов: ${unknown.map((w) => `«${w}»`).join(", ")}. Проверьте написание, попробуйте другой термин или загрузите нужный учебник.`
-        : "В загруженных учебниках не нашлось близких страниц. Уточните тему или загрузите нужный УМК."
-    );
-  }
-  let aiCtx = null;
-  let aiNote = "";
-  if (model.ready) {
-    try {
-      aiCtx = ai.beginRequest(user);
-    } catch (error) {
-      if (error.code === "limit") aiNote = `${error.message} Материал собран без ИИ.`;
+  const lookups = [];
+  let quotaNote = "";
+  if (hits.length && wantsModel) {
+    if (!allowModel) {
+      quotaNote = `Лимит нейросети на сегодня исчерпан (${quota.limit}). Показан материал из текста учебника.`;
+      if (type === "presentation") throw fail(429, `Лимит нейросети на сегодня исчерпан: ${quota.limit} запросов.`);
+    } else {
+      takeQuota();
+      lookups.push(...(await expandQueries(query, grade)));
     }
   }
-  const lookups = aiCtx ? await expandQueries(query, grade, aiCtx) : [];
   const seen = new Set(hits.map((h) => h.chunk.id));
   for (const phrase of lookups) {
     for (const hit of searchDetailed(state.chunks, phrase, searchOpts).hits) {
@@ -117,6 +113,12 @@ async function ask({ query, type = "all", bookIds, grade, subject, skipCache, co
         : "В загруженных учебниках не нашлось близких страниц. Уточните тему или загрузите нужный УМК."
     );
   }
+  if (type === "presentation" && !teacher) {
+    throw fail(403, "Презентацию собирает нейросеть. Она доступна после входа учителя.");
+  }
+  if (type === "presentation" && !model.ready) {
+    throw fail(400, "Нейросеть на сервере не подключена.");
+  }
   const bank = sentenceBank(state.chunks, searchOpts.bookIds);
   const pack = buildAll(query, hits.slice(0, 10), state.brand, { bank, count: size, variant: skipCache ? Date.now() : 0 });
   pack.lookups = lookups;
@@ -126,10 +128,10 @@ async function ask({ query, type = "all", bookIds, grade, subject, skipCache, co
     fixes: first.meta.terms.filter((t) => t.via === "typo" && t.suggestion).map((t) => ({ raw: t.raw, suggestion: t.suggestion })),
     forms: first.meta.terms.filter((t) => t.via === "form").map((t) => t.raw),
   };
-  if (aiNote) pack.modelNote = aiNote;
-  if (aiCtx && (!type || type === "all" || type === "test")) {
+  if (quotaNote) pack.modelNote = quotaNote;
+  if (allowModel && (!type || type === "all" || type === "test")) {
     try {
-      const test = await writeTest(query, hits.slice(0, 10), size, aiCtx);
+      const test = await writeTest(query, hits.slice(0, 10), size);
       if (test) {
         pack.materials.test = test;
         pack.model = model.name;
@@ -141,7 +143,26 @@ async function ask({ query, type = "all", bookIds, grade, subject, skipCache, co
       pack.modelNote = `${model.name} не ответила: ${e.message || "ошибка связи"}. Тест собран из текста учебника.`;
     }
   }
-  ai.finishRequest(aiCtx, { ok: Boolean(pack.llm) });
+  if (allowModel && (!type || type === "all" || type === "presentation")) {
+    try {
+      const deck = await writeSlides(query, hits.slice(0, 10));
+      if (deck) {
+        pack.materials.presentation = deck;
+        pack.model = deck.engine || model.name;
+        pack.llm = true;
+      } else if (type === "presentation") {
+        throw fail(502, `${model.name} не смогла собрать презентацию по этим страницам.`);
+      } else {
+        const note = `${model.name} не смогла собрать презентацию по этим страницам.`;
+        pack.modelNote = pack.modelNote ? `${pack.modelNote} ${note}` : note;
+      }
+    } catch (e) {
+      if (e.status) throw e;
+      const note = `${model.name} не ответила: ${e.message || "ошибка связи"}. Презентация не собрана.`;
+      if (type === "presentation") throw fail(502, note);
+      pack.modelNote = pack.modelNote ? `${pack.modelNote} ${note}` : note;
+    }
+  }
   const { test, ...rest } = pack.materials;
   pack.factCheck = factCheck(
     cleanRefs([...collectText(rest), ...testTruth(test)].join("\n")),
